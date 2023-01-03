@@ -773,16 +773,16 @@ class Reporter:
     def __init__(self, citizen):
         self._citizen = weakref.ref(citizen)
         self._req = Session()
-        self.url = "https://erep.lv"
+        self.url = ""
         self._req.headers.update({"user-agent": "eRepublik Script Reporter v3", "erep-version": utils.__version__})
         self.__to_update = []
         self.__registered: bool = False
 
     def do_init(self):
         self.key: str = ""
-        self.__update_key()
-        self._req.headers.update({"erep-user-id": str(self.citizen_id), "erep-user-name": self.name})
-        self.register_account()
+        # self.__update_key()
+        # self._req.headers.update({"erep-user-id": str(self.citizen_id), "erep-user-name": self.name})
+        # self.register_account()
         self.allowed = True
 
     @property
@@ -872,7 +872,7 @@ class Reporter:
             json_data["log"].update(dict(value=value))
         if not any([self.key, self.email, self.name, self.citizen_id]):
             return
-        self._bot_update(json_data)
+        # self._bot_update(json_data)
 
     def report_fighting(self, battle: "Battle", invader: bool, division: "BattleDivision", damage: float, hits: int):
         side = battle.invader if invader else battle.defender

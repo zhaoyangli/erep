@@ -12,7 +12,7 @@ CONFIG = {
     'email': 'jiqimaono2@163.com',
     'password': 'yuiop[',
     'interactive': True,
-    'fight': False,
+    'fight': True,
     'debug': False,
     'battle_launcher': {
         121672: {"auto_attack": False, "regions": [661]},
@@ -24,6 +24,7 @@ CONFIG = {
     'telegram_token': '1062108968:AAGRkXhOpA9qTuQ0Se8YFY0JnrKwImH_F4k'
 }
 
+
 def telextt(msg):
     xtttoken = '1255503748:AAGKqHbDh_SkZoFgTHE_761li730EMu8OYo'
     xttid = 988474037
@@ -31,6 +32,7 @@ def telextt(msg):
     # print(api_url)
     post(api_url,
          json=dict(chat_id=xttid, text=msg, parse_mode="Markdown"))
+
 
 def telextt2(msg):
     xtttoken = '1255503748:AAGKqHbDh_SkZoFgTHE_761li730EMu8OYo'
@@ -40,41 +42,35 @@ def telextt2(msg):
     post(api_url,
          json=dict(chat_id=xttid, text=msg, parse_mode="Markdown"))
 
-def teleme(msg):
-    xtttoken = '1062108968:AAGRkXhOpA9qTuQ0Se8YFY0JnrKwImH_F4k'
-    xttid = 901406392
-    api_url = "https://api.telegram.org/bot{}/sendMessage".format(xtttoken)
-    print(api_url)
-    post(api_url,
-         json=dict(chat_id=xttid, text=msg, parse_mode="Markdown"))
 
 def work_train_buy_eat(player: Citizen):
     try:
         player.update_citizen_info()
-        # player.update_inventory()
+        player.update_inventory()
         player.work()
         player.train()
-        # player.collect_weekly_reward()
+        player.collect_weekly_reward()
         # player.buy_monetary_market_offer()
         player.update_job_info()
         ot_time = player.my_companies.next_ot_time
         delta = utils.now() - ot_time
         print("work_train_buy next overtime", delta)
-        # if not player.is_levelup_reachable:
-        #     print(player.eat())
+        if not player.is_levelup_reachable:
+            print(player.eat())
         if delta > timedelta(minutes=50):
             player.work_ot()
             offers = player.get_monetary_offers()
             offer_id = offers[0]['offer_id']
-            print("work_train_buy ",player._post_economy_exchange_purchase(10, 62, offer_id))
+            print("work_train_buy ", player._post_economy_exchange_purchase(10, 62, offer_id))
             player.update_citizen_info()
             # if (player.energy.available > 1400) and int(utils.now().hour) > 17:
-                # print("work_train_buy ",player.work_as_manager())
+            # print("work_train_buy ",player.work_as_manager())
     except Exception as inst:
         print("work_train_buy exception", inst)
         player.report_error("Task error: work_train_buy")
 
-def no_terrain_fight(player: Citizen, id, count = 1):
+
+def no_terrain_fight(player: Citizen, id, count=1):
     battle_to_fight = player.all_battles.get(id)
     if battle_to_fight.invader.country.id == player.details.citizenship:
         battle_side = battle_to_fight.invader
@@ -88,10 +84,11 @@ def no_terrain_fight(player: Citizen, id, count = 1):
         # print(div.div)
         # print(div.terrain)
         if div.div < 4 and div.terrain == 0:
-            player._post_military_change_weapon(id,int(div.id),7)
+            player._post_military_change_weapon(id, int(div.id), 7)
             player.fight(battle_to_fight, div, side=battle_side, count=count)
 
-def after_summer_fight(player: Citizen, id, count = 1):
+
+def after_summer_fight(player: Citizen, id, count=1, findempty = True):
     battle_to_fight = player.all_battles.get(id)
     if battle_to_fight.invader.country.id == player.details.citizenship:
         battle_side = battle_to_fight.invader
@@ -100,49 +97,127 @@ def after_summer_fight(player: Citizen, id, count = 1):
     if player.all_battles.get(id).is_rw:
         print(battle_to_fight, " is rw! count 3")
         count = 3
-    for div in range(1,4):
+
+    for div in battle_to_fight.div.values():
+        # print(div.id)  10046316
+        # print(div.div)  3
+        # print(div.terrain)  0
+        if div.div < 4 and div.terrain == 0:
+            player._post_military_change_weapon(id, int(div.id), 7)
+            # player.fight(battle_to_fight, div, side=battle_side, count=1)
+
+            place = get_hit_status(player, id, div=div.div)
+            time.sleep(2)
+            if not findempty:
+                if not place == 1:
+                    continue
+            else:
+                if not place == 0:
+                    continue
+            player.fight(battle_to_fight, div, side=battle_side, count=count)
+
+    for div in range(1, 4):
         # print(div.id)
         # print(div.div)
         # print(div.terrain)
-        player.fight(battle_to_fight,div,side=battle_side, count=count)
+        place = get_hit_status(player, id, div=div)
+        time.sleep(2)
+        if not findempty:
+            if not place == 1:
+                continue
+        else:
+            if not place == 0:
+                continue
+        player.fight(battle_to_fight, div, side=battle_side, count=count)
         # if div.div < 4 and div.terrain == 0:
         #     player._post_military_change_weapon(id,int(div.id),7)
         #     player.fight(battle_to_fight, div, side=battle_side, count=count)
 
-def inform_new_and_checkBH(player,battles,new_battle_list,bh_watch_list, guaji: bool = True):
-    #after summer use after_summer_fight
+def after_summer_fight_div(player: Citizen, id, divint, count=1, findempty = True):
+    # just fight in divint
+    battle_to_fight = player.all_battles.get(id)
+    if battle_to_fight.invader.country.id == player.details.citizenship:
+        battle_side = battle_to_fight.invader
+    if battle_to_fight.defender.country.id == player.details.citizenship:
+        battle_side = battle_to_fight.defender
+    if player.all_battles.get(id).is_rw:
+        print(battle_to_fight, " is rw! count 3")
+        count = 3
+
+    for div in battle_to_fight.div.values():
+        # print(div.id)  10046316
+        # print(div.div)  3
+        # print(div.terrain)  0
+        if div.div == divint and div.terrain == 0:
+            player._post_military_change_weapon(id, int(div.id), 7)
+            # player.fight(battle_to_fight, div, side=battle_side, count=1)
+
+            # place = get_hit_status(player, id, div=div.div)
+            # time.sleep(2)
+            # if not findempty:
+            #     if not place == 1:
+            #         continue
+            # else:
+            #     if not place == 0:
+            #         continue
+            player.fight(battle_to_fight, div, side=battle_side, count=count)
+
+    for div in range(1, 4):
+        # print(div.id)
+        # print(div.div)
+        # print(div.terrain)
+        place = get_hit_status(player, id, div=div)
+        time.sleep(2)
+        if not findempty:
+            if not place == 1:
+                continue
+        else:
+            if not place == 0:
+                continue
+        player.fight(battle_to_fight, div, side=battle_side, count=count)
+        # if div.div < 4 and div.terrain == 0:
+        #     player._post_military_change_weapon(id,int(div.id),7)
+        #     player.fight(battle_to_fight, div, side=battle_side, count=count)
+
+
+def inform_new_and_checkBH(player, battles, new_battle_list, bh_watch_list, guaji: bool = True, fight_rw: bool = False):
+    # after summer use after_summer_fight
     # summer use no_terrain_fight
     for id in battles:
-        delta = utils.now() - player.all_battles[id].start
         print(player.all_battles[id])
-        print(delta)
+        delta = utils.now() - player.all_battles[id].start
         time.sleep(2)
-        if (delta < timedelta(minutes=3) or not (player.all_battles[id].has_started)):
+        if (delta < timedelta(minutes=15) and
+            delta > timedelta(minutes=0)):
             newbattleinfo = str(id) + ":" + str(player.all_battles[id].zone_id)
             if not newbattleinfo in new_battle_list:
                 print("inform_new_and_checkBH found new battle! ", newbattleinfo)
-                # if player.energy.available > 400:
-                #     if not player.all_battles[id].is_rw:
-                #         # no_terrain_fight(player, id)
-                #         after_summer_fight(player, id)
-                #     # if player.all_battles[id].is_rw:
-                #         # no_terrain_fight(player, id)
+                if player.energy.available > 400:
+                    if not player.all_battles[id].is_rw:
+                        # no_terrain_fight(player, id)
+                        after_summer_fight(player, id)
+                    if fight_rw:
+                        if player.all_battles[id].is_rw:
+                            after_summer_fight(player, id)
                 # message = 'find battle: ' + str(player.all_battles[id])
                 message2 = '/hit 123 https://www.erepublik.com/en/military/battlefield/' + str(id) + ' cn '
                 message3 = " new battle:  " + str(delta)
-                message4 = " new battle:  " + str(delta) + " https://www.erepublik.com/en/military/battlefield/" + str(id)
+                message4 = 'https://www.erepublik.com/en/military/battlefield/' + str(id)
 
-                # if guaji:
-                #     if (not player.all_battles[id].is_rw):
-                #         post(player.telegram.api_url,
-                #              json=dict(chat_id=player.telegram.chat_id, text=message2, parse_mode="Markdown"))
-                # else:
-                #     post(player.telegram.api_url,
-                #          json=dict(chat_id=player.telegram.chat_id, text=message2, parse_mode="Markdown"))
+                if guaji:
+                    if (not player.all_battles[id].is_rw):
+                        post(player.telegram.api_url,
+                             json=dict(chat_id=player.telegram.chat_id, text=message2, parse_mode="Markdown"))
+                else:
+                    post(player.telegram.api_url,
+                         json=dict(chat_id=player.telegram.chat_id, text=message2, parse_mode="Markdown"))
                 # post(player.telegram.api_url,
                 #      json=dict(chat_id=player.telegram.chat_id, text=message3, parse_mode="Markdown"))
-                teleme(message4)
-                # telextt(message2)
+                # post(player.telegram.api_url,
+                #      json=dict(chat_id=player.telegram.chat_id, text=message4, parse_mode="Markdown"))
+                ####################################################################################
+                telextt(message2)
+                #####################################################################################
                 new_battle_list.append(newbattleinfo)
                 # player.telegram.send_message('find battle: ' + str(player.all_battles[id]))
                 continue
@@ -159,13 +234,16 @@ def inform_new_and_checkBH(player,battles,new_battle_list,bh_watch_list, guaji: 
                                   + "  check BH in Div: " + str(i)
                         post(player.telegram.api_url,
                              json=dict(chat_id=player.telegram.chat_id, text=message, parse_mode="Markdown"))
-                        # telextt(message)
+                        ####################################################################
+                        telextt(message)
+                        ######################################################################
                         print(message)
                     bh_watch_list.append(bh_watch)
                 else:
                     print("check BH done: ", "div ", i, place)
             time.sleep(2)
     return new_battle_list, bh_watch_list
+
 
 def guaji_fangti(player: Citizen, hrs, battles, battles2):
     player.update_citizen_info()
@@ -183,11 +261,12 @@ def guaji_fangti(player: Citizen, hrs, battles, battles2):
     if ((player.energy.limit * 2 - player.energy.available < int(hrs * 10 * player.energy.interval)) and
         (player.energy.available > 500)):
         # hit, div, dam = find_avaiable_hits(player, battles, battles2, findempty=True)
-        hit, div, dam = find_avaiable_hits_di_d1_3(player,battles, battles2,findempty=True)
+        hit, div, dam = find_avaiable_hits_di_d1_3(player, battles, battles2, findempty=True)
         print("guaji_fangti hit, div, dam: {} {} {} ".format(hit, div, dam))
         if hit > 0:
             print("lets hit")
-            player.fight(hit, div, player.details.citizenship, count=1)
+            # player.fight(hit, div, player.details.citizenship, count=1)
+            after_summer_fight_div(player,hit,div)
             # player.fight_until_damage(hit, player.details.citizenship, count=1,
             #                           division=div, damage_final=dam)
         else:
@@ -195,7 +274,8 @@ def guaji_fangti(player: Citizen, hrs, battles, battles2):
             print("guaji_fangti hit, div, dam: {} {} {} ".format(hit, div, dam))
             if hit > 0:
                 print("lets hit")
-                player.fight(hit, div, player.details.citizenship, count=1)
+                # player.fight(hit, div, player.details.citizenship, count=1)
+                after_summer_fight_div(player, hit, div)
                 # player.fight_until_damage(hit, player.details.citizenship, count=1,
                 #                           division=div, damage_final=dam)
             print("no avaiable battle! ")
@@ -203,120 +283,6 @@ def guaji_fangti(player: Citizen, hrs, battles, battles2):
             print(player.eat())
     if not player.details.current_region == player.details.residence_region:
         player.travel_to_region(player.details.residence_region)
-
-def _battle_monitor_air(player: Citizen):
-    """Launch battles. Check every 5th minute (0,5,10...45,50,55) if any battle could be started on specified regions
-    and after launching wait for 90 minutes before starting next attack so that all battles aren't launched at the same
-    time. If player is allowed to fight, do 100 hits on the first round in players division.
-
-    :param player: Logged in Citizen instance
-    ":type player: Citizen
-    """
-    global CONFIG
-    finished_war_ids = {*[]}
-    war_data = CONFIG.get('start_battles', {})
-    war_ids = {int(war_id) for war_id in war_data.keys()}
-    next_attack_time = player.now
-    next_attack_time = next_attack_time.replace(minute=next_attack_time.minute // 5 * 5, second=0)
-    print("101", next_attack_time)
-    new_battle_list = []
-    bh_watch_list = []
-    while not player.stop_threads.is_set():
-        try:
-            player.update_war_info()
-            battles = player.cus_sorted_battles_all_air()
-            print(battles)
-            utils.now()
-            for id in battles:
-                delta = utils.now() - player.all_battles[id].start
-                time.sleep(1)
-                print(delta)
-                if (delta < timedelta(minutes=0)):
-                    print("found!")
-                    newbattleinfo = str(id) + ":" + str(player.all_battles[id].zone_id)
-                    print(newbattleinfo)
-                    if not newbattleinfo in new_battle_list:
-                        # message = 'find battle: ' + str(player.all_battles[id])
-                        message2 = 'https://www.erepublik.com/en/military/battlefield/' + str(id)
-                        message3 = " new battle:  " + str(delta)
-                        post(player.telegram.api_url,
-                             json=dict(chat_id=player.telegram.chat_id, text=message2, parse_mode="Markdown"))
-                        new_battle_list.append(newbattleinfo)
-                        # player.telegram.send_message('find battle: ' + str(player.all_battles[id]))
-                        continue
-            print(battles)
-            player.stop_threads.wait(utils.get_sleep_seconds(next_attack_time))
-        except:
-            player.report_error("Task error: start_battles")
-        ###########################################################
-        next_attack_time = utils.good_timedelta(next_attack_time, timedelta(minutes=3))
-        print("133", next_attack_time)
-        player.stop_threads.wait(utils.get_sleep_seconds(next_attack_time))
-
-def _battle_monitor_all(player: Citizen):
-    """Launch battles. Check every 5th minute (0,5,10...45,50,55) if any battle could be started on specified regions
-    and after launching wait for 90 minutes before starting next attack so that all battles aren't launched at the same
-    time. If player is allowed to fight, do 100 hits on the first round in players division.
-
-    :param player: Logged in Citizen instance
-    ":type player: Citizen
-    """
-    global CONFIG
-    finished_war_ids = {*[]}
-    war_data = CONFIG.get('start_battles', {})
-    war_ids = {int(war_id) for war_id in war_data.keys()}
-    next_attack_time = player.now
-    next_attack_time = next_attack_time.replace(minute=next_attack_time.minute // 5 * 5, second=0)
-    print("101", next_attack_time)
-    new_battle_list = []
-    while not player.stop_threads.is_set():
-        player.update_war_info()
-        battles = player.cus_sorted_battles_all_groud()
-        print(battles)
-        for id in battles:
-            delta = utils.now() - player.all_battles[id].start
-            time.sleep(2)
-            if (delta > timedelta(minutes=70)):
-                # print("found!")
-                newbattleinfo = str(id) + ":" + str(player.all_battles[id].zone_id)
-                print(newbattleinfo)
-                # if not newbattleinfo in new_battle_list:
-                #     # message = 'find battle: ' + str(player.all_battles[id])
-                #     message2 = 'https://www.erepublik.com/en/military/battlefield/' + str(id) \
-                #                + " new battle:  " + str(delta)
-                #     post(player.telegram.api_url,
-                #          json=dict(chat_id=player.telegram.chat_id, text=message2, parse_mode="Markdown"))
-                #     new_battle_list.append(newbattleinfo)
-                #     # player.telegram.send_message('find battle: ' + str(player.all_battles[id]))
-                #     continue
-                for i in range(1, 5):
-                    place = player.get_empty_status(id, div=i)
-                    print(place)
-                    time.sleep(1)
-                    if place > 0:
-                        message = 'https://www.erepublik.com/en/military/battlefield/' + str(id) \
-                                  + "  empty in Div: " + str(i)
-                        post(player.telegram.api_url,
-                             json=dict(chat_id=player.telegram.chat_id, text=message, parse_mode="Markdown"))
-                        print(message)
-                        break
-                    else:
-                        print("check BH done: ", "div ", i, place)
-
-        print(battles)
-        player.stop_threads.wait(utils.get_sleep_seconds(next_attack_time))
-        ###########################################################
-        # over_time
-        # player.update_job_info()
-        # ot_time = player.my_companies.next_ot_time
-        # delta = utils.now() - ot_time
-        # print(" next overtime", delta)
-        # if delta > timedelta(minutes=1):
-        #     player.work_ot()
-        ################################################
-        next_attack_time = utils.good_timedelta(next_attack_time, timedelta(minutes=5))
-        print("149", next_attack_time)
-        player.stop_threads.wait(utils.get_sleep_seconds(next_attack_time))
 
 def _battle_monitor(player: Citizen, hrs: float):
     """Launch battles. Check every 5th minute (0,5,10...45,50,55) if any battle could be started on specified regions
@@ -343,7 +309,7 @@ def _battle_monitor(player: Citizen, hrs: float):
             battles2 = battles_list[4]
             # guaji_fangti(player, hrs, battles, battles2 )
             utils.now()
-            new_battle_list,bh_watch_list = inform_new_and_checkBH(player,battles,new_battle_list,bh_watch_list)
+            new_battle_list, bh_watch_list = inform_new_and_checkBH(player, battles, new_battle_list, bh_watch_list)
             player.update_citizen_info()
             if not player.details.current_region == player.details.residence_region:
                 print("player.details.current_region", player.details.current_region)
@@ -356,7 +322,7 @@ def _battle_monitor(player: Citizen, hrs: float):
                 }
                 player._post_main_travel("moveAction", **data)
                 # player.travel_to_holding(player.my_companies.holdings[0])
-            print("_battle_monitor 288",battles)
+            print("_battle_monitor 288", battles)
             player.stop_threads.wait(utils.get_sleep_seconds(next_attack_time))
         except:
             player.report_error("Task error: start_battles")
@@ -367,7 +333,7 @@ def _battle_monitor(player: Citizen, hrs: float):
         print("149", next_attack_time)
         player.stop_threads.wait(utils.get_sleep_seconds(next_attack_time))
 
-def _battle_monitor_after_summer(player: Citizen, hrs: float):
+def _battle_monitor_after_summer_inherit_from_summer(player: Citizen, hrs: float):
     """Launch battles. Check every 5th minute (0,5,10...45,50,55) if any battle could be started on specified regions
     and after launching wait for 90 minutes before starting next attack so that all battles aren't launched at the same
     time. If player is allowed to fight, do 100 hits on the first round in players division.
@@ -392,7 +358,7 @@ def _battle_monitor_after_summer(player: Citizen, hrs: float):
             battles2 = battles_list[4]
             # guaji_fangti(player, hrs, battles, battles2 )
             utils.now()
-            new_battle_list,bh_watch_list = inform_new_and_checkBH(player,battles,new_battle_list,bh_watch_list)
+            new_battle_list, bh_watch_list = inform_new_and_checkBH(player, battles, new_battle_list, bh_watch_list)
             player.update_citizen_info()
             if not player.details.current_region == player.details.residence_region:
                 print("player.details.current_region", player.details.current_region)
@@ -405,7 +371,7 @@ def _battle_monitor_after_summer(player: Citizen, hrs: float):
                 }
                 player._post_main_travel("moveAction", **data)
                 # player.travel_to_holding(player.my_companies.holdings[0])
-            print("_battle_monitor 288",battles)
+            print("_battle_monitor 288", battles)
             player.stop_threads.wait(utils.get_sleep_seconds(next_attack_time))
         except:
             player.report_error("Task error: start_battles")
@@ -416,16 +382,18 @@ def _battle_monitor_after_summer(player: Citizen, hrs: float):
         print("149", next_attack_time)
         player.stop_threads.wait(utils.get_sleep_seconds(next_attack_time))
 
+
 def get_hit_status(player, battle_id: int, div: int = 4,
                    target_hit=[7636970, 7087490, 6246857, 6880339, 2858573, 4511581, 5905067]) -> int:
     # return {}
     battle = player.all_battles.get(battle_id)
     round_id = battle.zone_id
-    division = div if round_id % 4 >0 else 11
+    division = div if round_id % 4 > 0 else 11
     division = div
-    resp = player._post_military_battle_console(battle_id, 'battleStatistics', round_id=round_id, division=division).json()
+    resp = player._post_military_battle_console(battle_id, 'battleStatistics', round_id=round_id,
+                                                division=division).json()
     resp.pop('rounds', None)
-    print("get_hit_status resp ",resp)
+    print("get_hit_status resp ", resp)
 
     # {'14': {'fighterData': {'1': {'citizenId': 1542079, 'citizenName': 'jiqimaono2', 'country_name': 'China',
     #                               'citizenAvatar': 'https://cdnt.erepublik.net/7s5Qg3dx1IiFOtYYGRa3yJK8URM=/30x30/smart/avatars/Citizens/2009/06/11/820af46e7726ab11dd955c73954a22e0.jpg',
@@ -446,7 +414,7 @@ def get_hit_status(player, battle_id: int, div: int = 4,
     ret = []
     for country_id, data in resp.items():
         # print(" country id:" , country_id)
-        if not int(country_id) == player.details.citizenship :
+        if not int(country_id) == player.details.citizenship:
             continue
         try:
             for place in sorted(data.get("fighterData", {}).values(), key=lambda _: -_['raw_value']):
@@ -455,36 +423,37 @@ def get_hit_status(player, battle_id: int, div: int = 4,
             continue
     place = -1
     # print("name: ", self.name)
-    print("get_hit_status ret ",ret)
+    print("get_hit_status ret ", ret)
     if len(ret) == 0:
         return 0
     for fighter in ret:
         if division == 1:
-            if fighter[1] in target_hit :
+            if fighter[1] in target_hit:
                 if fighter[2] < 5000000:
                     place = ret.index(fighter) + 1
                     return place
         if division == 2:
-            if fighter[1] in target_hit :
+            if fighter[1] in target_hit:
                 if fighter[2] < 5000000:
                     place = ret.index(fighter) + 1
                     return place
         if division == 3:
-            if fighter[1] in target_hit :
+            if fighter[1] in target_hit:
                 if fighter[2] < 5000000:
                     place = ret.index(fighter) + 1
                     return place
     return place
 
 
-def get_my_status_only(player:Citizen, battle_id: int, div: int = 4):
+def get_my_status_only(player: Citizen, battle_id: int, div: int = 4):
     # return {}
     battle = player.all_battles.get(battle_id)
     print("2931")
     round_id = battle.zone_id
-    division = div if round_id % 4 >0 else 11
+    division = div if round_id % 4 > 0 else 11
     division = div
-    resp = player._post_military_battle_console(battle_id, 'battleStatistics', round_id=round_id, division=division).json()
+    resp = player._post_military_battle_console(battle_id, 'battleStatistics', round_id=round_id,
+                                                division=division).json()
     resp.pop('rounds', None)
     # {'14': {'fighterData': {'1': {'citizenId': 1542079, 'citizenName': 'jiqimaono2', 'country_name': 'China',
     #                               'citizenAvatar': 'https://cdnt.erepublik.net/7s5Qg3dx1IiFOtYYGRa3yJK8URM=/30x30/smart/avatars/Citizens/2009/06/11/820af46e7726ab11dd955c73954a22e0.jpg',
@@ -529,7 +498,9 @@ def get_my_status_only(player:Citizen, battle_id: int, div: int = 4):
         #     place = ret.index(fighter) + 1
     return place, dam, max
 
-def find_avaiable_hits(player: Citizen, battles2, battles, div=[1,2,3,], localonly: bool = True, findempty: bool = True):
+
+def find_avaiable_hits(player: Citizen, battles2, battles, div=[1, 2, 3, ], localonly: bool = True,
+                       findempty: bool = True):
     print("find_avaiable_hits util.now: ", utils.now())
     print("find_avaiable_hits found: ", battles)
     dmg1 = {1: 5500000, 2: 11500000, 3: 15500000}
@@ -537,7 +508,7 @@ def find_avaiable_hits(player: Citizen, battles2, battles, div=[1,2,3,], localon
     for id in battles:
         print("find_avaiable_hits found: ", player.all_battles[id])
         for i in range(1, 4):
-            place = get_hit_status(player,id, div=i)
+            place = get_hit_status(player, id, div=i)
             time.sleep(2)
             if not findempty:
                 if not place == 1:
@@ -580,7 +551,8 @@ def find_avaiable_hits(player: Citizen, battles2, battles, div=[1,2,3,], localon
         index = 0
         for id in battles_allground:
             place, mydam, max = get_my_status_only(id, div=4)
-            max = player.get_my_status_damage(id, div=4)
+            # max = player.get_my_status_damage(id, div=4)
+            max = get_my_status_only(player,id,div=4)[1]
             print("max: {} my damage {}:".format(max, mydam))
             if max - mydam < maxdamage:
                 maxdamage = max - mydam
@@ -588,8 +560,9 @@ def find_avaiable_hits(player: Citizen, battles2, battles, div=[1,2,3,], localon
         return battles_allground[index], 4, 0
     return 0, 0, 0
 
-def find_avaiable_hits_did(player: Citizen,battles2, battles, localonly: bool = False,
-                           findempty: bool = True ):
+
+def find_avaiable_hits_did(player: Citizen, battles2, battles, localonly: bool = False,
+                           findempty: bool = True):
     player.update_war_info()
     print("find_avaiable_hits_did util: ", utils.now())
     dmg1 = {1: 5100000, 2: 11100000, 3: 13100000}
@@ -638,23 +611,25 @@ def find_avaiable_hits_did(player: Citizen,battles2, battles, localonly: bool = 
                         return id, i, dmg2[i]
     return 0, 0, 0
 
-def find_avaiable_hits_di_d1_3(player: Citizen ,battles2, battles, div=[1,2,3,4], localonly: bool = True, findempty: bool = False):
+
+def find_avaiable_hits_di_d1_3(player: Citizen, battles2, battles, div=[1, 2, 3, 4], localonly: bool = True,
+                               findempty: bool = False):
     player.update_war_info()
     print("find_avaiable_hits_di_d1_3 util: ", utils.now())
     dmg1 = {1: 5100000, 2: 11100000, 3: 13100000}
     dmg2 = {1: 7200000, 2: 13200000, 3: 17000000}
     for id in battles:
-        print("find_avaiable_hits_di_d1_3 462 ",player.all_battles[id])
+        print("find_avaiable_hits_di_d1_3 462 ", player.all_battles[id])
         delta = utils.now() - player.all_battles[id].start
         if (delta > timedelta(minutes=45) or delta < timedelta(minutes=0)):
             continue
-        print("find_avaiable_hits_di_d1_3 466 delta: ",delta)
+        print("find_avaiable_hits_di_d1_3 466 delta: ", delta)
         place1 = get_hit_status(player, id, div=1)
-        place2 = get_hit_status(player,id, div=2)
-        place3 = get_hit_status(player,id, div=3)
+        place2 = get_hit_status(player, id, div=2)
+        place3 = get_hit_status(player, id, div=3)
         for i in range(4, 15):
-            print("find_avaiable_hits_di_d1_3 range: ",i," ",get_hit_status(player,id, div=i))
-        print("find_avaiable_hits_di_d1_3 537 place: {}/{}/{} ".format(place1,place2,place3))
+            print("find_avaiable_hits_di_d1_3 range: ", i, " ", get_hit_status(player, id, div=i))
+        print("find_avaiable_hits_di_d1_3 537 place: {}/{}/{} ".format(place1, place2, place3))
         if not findempty:
             if place1 == 1 and place2 == 1 and place3 == 1:
                 return id, 123, dmg1
@@ -692,9 +667,9 @@ def find_avaiable_hits_di_d1_3(player: Citizen ,battles2, battles, div=[1,2,3,4]
             if (delta > timedelta(minutes=55)):
                 print("skip!")
                 continue
-            place1 = get_hit_status(player,id, div=1)
-            place2 = get_hit_status(player,id, div=2)
-            place3 = get_hit_status(player,id, div=3)
+            place1 = get_hit_status(player, id, div=1)
+            place2 = get_hit_status(player, id, div=2)
+            place3 = get_hit_status(player, id, div=3)
             if not findempty:
                 if place1 == 1 and place2 == 1 and place3 == 1:
                     return id, 123, dmg2
@@ -722,6 +697,7 @@ def find_avaiable_hits_di_d1_3(player: Citizen ,battles2, battles, div=[1,2,3,4]
                 elif place3 == 0:
                     return id, 3, dmg2
     return 0, 0, 0
+
 
 def _battle_monitor_hit(player: Citizen, hrs: float):
     """Launch battles. Check every 5th minute (0,5,10...45,50,55) if any battle could be started on specified regions
@@ -796,7 +772,8 @@ def _battle_monitor_hit(player: Citizen, hrs: float):
                         #      json=dict(chat_id=player.telegram.chat_id, text=message4, parse_mode="Markdown"))
                         telextt(message2)
                         if (not player.all_battles[id].is_rw) and player.energy.available > 1000:
-                            post(player.telegram.api_url,json=dict(chat_id=player.telegram.chat_id, text=message2, parse_mode="Markdown"))
+                            post(player.telegram.api_url,
+                                 json=dict(chat_id=player.telegram.chat_id, text=message2, parse_mode="Markdown"))
                         new_battle_list.append(newbattleinfo)
                         # player.telegram.send_message('find battle: ' + str(player.all_battles[id]))
                         # continue
@@ -827,10 +804,98 @@ def _battle_monitor_hit(player: Citizen, hrs: float):
         ###########################################################
         # over_time, train, buy offer
         ##########################################
-           ################################################
+        ################################################
         next_attack_time = utils.good_timedelta(next_attack_time, timedelta(seconds=300))
         print("hit 149", next_attack_time)
         player.stop_threads.wait(utils.get_sleep_seconds(next_attack_time))
+
+
+def _battle_monitor_after_summer(player: Citizen, hrs: float):
+    #inherit from _battle_monitor_hit
+    """Launch battles. Check every 5th minute (0,5,10...45,50,55) if any battle could be started on specified regions
+    and after launching wait for 90 minutes before starting next attack so that all battles aren't launched at the same
+    time. If player is allowed to fight, do 100 hits on the first round in players division.
+
+    :param player: Logged in Citizen instance
+    ":type player: Citizen
+    """
+    global CONFIG
+    finished_war_ids = {*[]}
+    war_data = CONFIG.get('start_battles', {})
+    next_attack_time = player.now
+    next_attack_time = next_attack_time.replace(minute=next_attack_time.minute // 5 * 5, second=59)
+    print("hit 101", next_attack_time)
+    bh_watch_list = []
+    new_battle_list = []
+    while not player.stop_threads.is_set():
+        try:
+            ####################################################################
+            # player.update_citizen_info()
+            # player.update_inventory()
+            # print(player.energy)
+            # print("hrs: ", hrs)
+            # # print("missing energy: ", player.energy.limit * 2 - player.energy.available)
+            # # print("consider-full energy: ", player.energy.limit * 2 - hrs * 10 * player.energy.interval)
+            # print("consider-full time: ",
+            #       (player.energy.limit * 2 - player.energy.available) / (10 * player.energy.interval))
+            # # energy.limit: 1060  energy.recoverable: 769 energy.recovered: 1060 energy.available: 1829 energy.interval: 30
+            # print(player.food)
+            # if not player.is_levelup_reachable:
+            #     print(player.eat())
+            # if ((player.energy.limit * 2 - player.energy.available < int(hrs * 10 * player.energy.interval)) and
+            #     (player.energy.available > 600)):
+            #     hit, div, dam = find_avaiable_hits(player)
+            #     # hit, div, dam = find_avaiable_hits_did(player)
+            #     print("hit, div, dam: {} {} {} ".format(hit, div, dam))
+            #     if hit > 0:
+            #         print("lets hit")
+            #         # player.fight_until_damage(hit, player.details.citizenship, count=int(0.1 * player.energy.interval),
+            #         #                           division=div, damage_final=dam)
+            #         after_summer_fight(player, id, count=1)
+            #         # player.fight_until_damage(hit, player.details.citizenship, count=1,
+            #         #                           division=div, damage_final=dam)
+            #     else:
+            #         print("no avaiable battle! ")
+            #     if not player.is_levelup_reachable:
+            #         print(player.eat())
+            # if not player.details.current_region == player.details.residence_region:
+            #     player.travel_to_region(player.details.residence_region)
+
+            ######################################################################
+            #below from summer
+            player.update_war_info()
+            battles_list = cus_sorted_battles(player)
+            battles = battles_list[4] # all ground battle
+            battlesall = battles_list[3]
+            # guaji_fangti(player, hrs, battlesall, battles)
+            utils.now()
+            new_battle_list,bh_watch_list = inform_new_and_checkBH(player,battles,new_battle_list,bh_watch_list)
+            player.update_citizen_info()
+            if not player.details.current_region == player.details.residence_region:
+                print("player.details.current_region", player.details.current_region)
+                print("player.details.residence_region", player.details.residence_region)
+                # player.travel_to_region(player.details.residence_region)
+                player.travel_to_residence()
+                data = {
+                    "toCountryId": 14,
+                    "inRegionId": 395,
+                }
+                player._post_main_travel("moveAction", **data)
+                # player.travel_to_holding(player.my_companies.holdings[0])
+            print("_battle_monitor 811",battles)
+            player.stop_threads.wait(utils.get_sleep_seconds(next_attack_time))
+        except Exception as inst:
+            print("hit except", inst)
+            player.report_error("Task error: start_battles")
+        ###########################################################
+        # over_time, train, buy offer
+        ##########################################
+        # work_train_buy_eat(player)
+        ################################################
+        next_attack_time = utils.good_timedelta(next_attack_time, timedelta(seconds=300))
+        print("hit 149", next_attack_time)
+        player.stop_threads.wait(utils.get_sleep_seconds(next_attack_time))
+
 
 def _battle_monitor_hit_zaixian(player: Citizen, hrs: float):
     """hit when have full energy
@@ -948,7 +1013,6 @@ def _battle_monitor_hit_zaixian(player: Citizen, hrs: float):
                             print("check BH done: ", "div ", i, place)
                     time.sleep(2)
 
-
             player.stop_threads.wait(utils.get_sleep_seconds(next_attack_time))
         except Exception as inst:
             print("hit except", inst)
@@ -970,96 +1034,6 @@ def _battle_monitor_hit_zaixian(player: Citizen, hrs: float):
         except Exception as inst:
             print("hit except", inst)
             player.report_error("Task error: start_battles")
-
-def _battle_monitor_2023(player: Citizen, hrs: float):
-    """Launch battles. Check every 5th minute (0,5,10...45,50,55) if any battle could be started on specified regions
-    and after launching wait for 90 minutes before starting next attack so that all battles aren't launched at the same
-    time. If player is allowed to fight, do 100 hits on the first round in players division.
-
-    :param player: Logged in Citizen instance
-    ":type player: Citizen
-    """
-    global CONFIG
-    finished_war_ids = {*[]}
-    war_data = CONFIG.get('start_battles', {})
-    next_attack_time = player.now
-    next_attack_time = next_attack_time.replace(minute=next_attack_time.minute // 5 * 5, second=59)
-    print("hit 978", next_attack_time)
-    bh_watch_list = []
-    new_battle_list = []
-    while not player.stop_threads.is_set():
-        try:
-            ####################################################################
-            player.update_citizen_info()
-            # player.update_inventory()
-            print(player.energy)            #avaiable/energy=3030  limit=5160 interval=83
-            print("hrs: ", hrs)
-            # print("missing energy: ", player.energy.limit * 2 - player.energy.available)
-            # print("consider-full energy: ", player.energy.limit * 2 - hrs * 10 * player.energy.interval)
-            print((player.energy.limit - player.energy.energy) / player.energy.interval)
-            health = player.energy.limit - player.energy.energy
-            recovertime = int( (player.energy.limit - player.energy.energy) / (player.energy.interval/6) )
-            if health < 5000 :
-                messagehealth = "Health almost full " + str(health)\
-                                + " ... " + str(player.energy.limit)+ "/"  + str(player.energy.energy)\
-                                + "  recover: " + str(player.energy.interval) + \
-                                " in " + str(recovertime) + " min"
-                teleme(messagehealth)
-            # energy.limit: 1060  energy.recoverable: 769 energy.recovered: 1060 energy.available: 1829 energy.interval: 30
-            print("food: ",
-                player.food)
-            # if not player.is_levelup_reachable:
-            #     print(player.eat())
-            # if ((player.energy.limit * 2 - player.energy.available < int(hrs * 10 * player.energy.interval)) and
-            #     (player.energy.available > 600)):
-            #     hit, div, dam = find_avaiable_hits(player)
-            #     # hit, div, dam = find_avaiable_hits_did(player)
-            #     print("hit, div, dam: {} {} {} ".format(hit, div, dam))
-            #     if hit > 0:
-            #         print("lets hit")
-            #         player.fight_until_damage(hit, player.details.citizenship, count=int(0.1 * player.energy.interval),
-            #                                   division=div, damage_final=dam)
-            #         # player.fight_until_damage(hit, player.details.citizenship, count=1,
-            #         #                           division=div, damage_final=dam)
-            #     else:
-            #         print("no avaiable battle! ")
-            #     if not player.is_levelup_reachable:
-            #         print(player.eat())
-            # if not player.details.current_region == player.details.residence_region:
-            #     player.travel_to_region(player.details.residence_region)
-
-            #####################################################################
-            player.update_war_info()
-            battles_list = cus_sorted_battles(player)
-            battles = battles_list[11]  # all ground battle
-            # guaji_fangti(player, hrs, battlesall, battles)
-            utils.now()
-            new_battle_list, bh_watch_list = inform_new_and_checkBH(player, battles, new_battle_list, bh_watch_list)
-            # player.update_citizen_info()
-            # if not player.details.current_region == player.details.residence_region:
-            #     print("player.details.current_region", player.details.current_region)
-            #     print("player.details.residence_region", player.details.residence_region)
-            #     # player.travel_to_region(player.details.residence_region)
-            #     player.travel_to_residence()
-            #     data = {
-            #         "toCountryId": 14,
-            #         "inRegionId": 395,
-            #     }
-            #     player._post_main_travel("moveAction", **data)
-            #     # player.travel_to_holding(player.my_companies.holdings[0])
-            # print("_battle_monitor 811", battles)
-            player.stop_threads.wait(utils.get_sleep_seconds(next_attack_time))
-        except Exception as inst:
-            print("hit except", inst)
-            player.report_error("Task error: start_battles")
-        ###########################################################
-        # over_time, train, buy offer
-        ##########################################
-        work_train_buy_eat(player)
-        ################################################
-        next_attack_time = utils.good_timedelta(next_attack_time, timedelta(seconds=300))
-        print("hit #1061", next_attack_time)
-        player.stop_threads.wait(utils.get_sleep_seconds(next_attack_time))
 
 
 def cus_sorted_battles(player: Citizen, sort_by_time: bool = True) -> List[List[int]]:
@@ -1138,16 +1112,18 @@ def cus_sorted_battles(player: Citizen, sort_by_time: bool = True) -> List[List[
     ret_battles = ret_battles + cs_battles + deployed_battles + other_battles
     return [cs_battles_priority_air, cs_battles_priority_ground, cs_battles_air, cs_battles_ground,
             cs_battles_ground_not_rw,
-            deployed_battles_air , deployed_battles_ground,
-            ally_battles_air , ally_battles_ground , other_battles_air , other_battles_ground,cs_battles
+            deployed_battles_air, deployed_battles_ground,
+            ally_battles_air, ally_battles_ground, other_battles_air, other_battles_ground
             ]
+
 
 def get_my_status(player: Citizen, battle_id: int, div: int = 4) -> int:
     # return {}
     battle = player.all_battles.get(battle_id)
     round_id = battle.zone_id
-    division = div if round_id % 4 >0 else 11
-    resp = player._post_military_battle_console(battle_id, 'battleStatistics', round_id=round_id, division=division).json()
+    division = div if round_id % 4 > 0 else 11
+    resp = player._post_military_battle_console(battle_id, 'battleStatistics', round_id=round_id,
+                                                division=division).json()
     resp.pop('rounds', None)
     ret = []
     # print(resp)
@@ -1166,13 +1142,14 @@ def get_my_status(player: Citizen, battle_id: int, div: int = 4) -> int:
         return place
     for fighter in ret:
         if fighter[1] == player.details.citizen_id:
-        # if fighter[1] == 1542079:
+            # if fighter[1] == 1542079:
             place = ret.index(fighter) + 1
             return place
         elif fighter[0] == 'xtt1230':
             place = ret.index(fighter) + 1
             return place
     return place
+
 
 def main():
     player = Citizen(email=CONFIG['email'], password=CONFIG['password'], auto_login=False)
@@ -1182,48 +1159,58 @@ def main():
     player.config.telegram_token = CONFIG['telegram_token']
     player.set_debug(CONFIG.get('debug', False))
     player.login()
-###############################################
+
+    id = 300918
     # player.update_war_info()
-    # battle = player.all_battles.get(515226)
-    # print("div: ", battle.div)
-    # delta = utils.now() - battle.start
-    # print(delta)
-    # print("defender : ", battle.defender)
-    # battle_side = battle.defender
-    # if battle.invader.country.id == player.details.citizenship:
-    #     battle_side = battle.invader
+    player.update_all()
+    player.update_war_info()
+    battles_list = cus_sorted_battles(player)
+    battles = battles_list[4]  # all ground battle
+    battlesall = battles_list[3]
     #
-    # for diva in battle.div.values():
-    #     print("diva : ",diva)
-    #     print("div id : ",diva.id)
-    #     print("div div: ",diva.div)
-    #     print("div ter: ",diva.terrain)
-    #     # print("find_avaiable_hits_di_d1_3 range: ", div.id, " ", get_hit_status(player, 283566, div=int(div.id) ))
-    #     player.fight(battle,diva,side=battle_side,count=1)
-    ########################################################
-    # summer event
-    ####################################################################
-    # name = "{}-start_battles_moniter-{}".format(player.name, threading.active_count() - 1)
-    # state_thread = threading.Thread(target=_battle_monitor, args=(player, 2), name=name)
-    # state_thread.start()
-    ############################################################################
-    # name2 = "{}-start_battles_moniter_all-{}".format(player.name, threading.active_count() - 1)
-    # state_thread2 = threading.Thread(target=_battle_monitor_all, args=(player,), name=name2)
-    # state_thread2.start()
-    #######################################################################
-    ############################################################################
-    # name2 = "{}-start_battles_moniter_air-{}".format(player.name, threading.active_count() - 1)
-    # state_thread2 = threading.Thread(target=_battle_monitor_air, args=(player,), name=name2)
-    # state_thread2.start()
-    #######################################################################
-    ####################################################################
-    # guaji - auto find d123 to hit, if energy is almost full,
-    ##################################################
-    # hrs: float = 0.6
-    # # hrs: float = 4
-    # name = "{}-start_battles_moniter_hit-{}".format(player.name, threading.active_count() - 1)
-    # state_thread = threading.Thread(target=_battle_monitor_hit, args=(player, hrs), name=name)
-    # state_thread.start()
+    # for int in range(1,4):
+    #     place = get_hit_status(player,id,int)
+    #     print(place)
+    # hit, div, dam = find_avaiable_hits_di_d1_3(player, battlesall, battles, findempty=True)
+    # print("guaji_fangti hit, div, dam: {} {} {} ".format(hit, div, dam))
+    # hit, div, dam = find_avaiable_hits(player, battlesall, battles, findempty=True)
+    # print("guaji_fangti 2  hit, div, dam: {} {} {} ".format(hit, div, dam))
+    #
+    # hit, div, dam = find_avaiable_hits_di_d1_3(player, battlesall, battles, findempty=True)
+    # print("guaji_fangti hit, div, dam: {} {} {} ".format(hit, div, dam))
+    # if hit > 0:
+    #     print("lets hit")
+    #     # player.fight(hit, div, player.details.citizenship, count=1)
+    #     after_summer_fight_div(player, hit, div)
+    #     # player.fight_until_damage(hit, player.details.citizenship, count=1,
+    #     #                           division=div, damage_final=dam)
+    # else:
+    #     hit, div, dam = find_avaiable_hits(player, battlesall, battles, findempty=True)
+    #     print("guaji_fangti hit, div, dam: {} {} {} ".format(hit, div, dam))
+    #     if hit > 0:
+    #         print("lets hit")
+    #         # player.fight(hit, div, player.details.citizenship, count=1)
+    #         after_summer_fight_div(player, hit, div)
+    #         # player.fight_until_damage(hit, player.details.citizenship, count=1,
+    #         #                           division=div, damage_final=dam)
+    #     print("no avaiable battle! ")
+
+    # battles_list = cus_sorted_battles(player)
+    # return [cs_battles_priority_air,
+    # cs_battles_priority_ground,
+    # cs_battles_air,
+    # cs_battles_ground,
+    #         cs_battles_ground_not_rw,
+    #         deployed_battles_air,
+    #         deployed_battles_ground,
+    #         ally_battles_air, ally_battles_ground, other_battles_air, other_battles_ground
+    #         ]
+    # battle0 = battles_list[0]
+    # battles1 = battles_list[4]
+    # for i in range(0,7):
+    #     print(i)
+    #     print(battles_list[i])
+
     ############################################################################    ####################################################################
     # guaji-after summer - auto find local d123 to hit and hit d4 if energy is almost full,
     ##################################################
@@ -1244,15 +1231,6 @@ def main():
     # state_thread.start()
     ############################################################################
 
-    ############################################################################    ####################################################################
-    # 2023-monitor - monitor new battle start, check BH, warn energy full
-    ##################################################
-    hrs: float = 0.6
-    # hrs: float = 4
-    name = "{}-start_battles_moniter_hit-{}".format(player.name, threading.active_count() - 1)
-    state_thread = threading.Thread(target=_battle_monitor_2023, args=(player, hrs), name=name)
-    state_thread.start()
-    ############################################################################
 
 if __name__ == "__main__":
     main()

@@ -195,10 +195,10 @@ class BaseCitizen(access_points.CitizenAPI):
             if promos:
                 for promo in promos:
                     kind = promo["typeId"]
-                    time_until = utils.localize_timestamp(promo["expiresAt"])
-                    if kind not in self.promos:
-                        self.reporter.report_promo(kind, time_until)
-                        self.promos[kind] = time_until
+                    # time_until = utils.localize_timestamp(promo["expiresAt"])
+                    # if kind not in self.promos:
+                        # self.reporter.report_promo(kind, time_until)
+                        # self.promos[kind] = time_until
         except Exception:  # noqa
             self.report_error()
         new_date = re.search(r"var new_date = '(\d*)';", html)
@@ -252,7 +252,10 @@ class BaseCitizen(access_points.CitizenAPI):
 
     def update_all(self):
         self.update_citizen_info()
-        self.update_inventory()
+        self.update_weekly_challenge()
+        self.update_money()
+        # self.update_war_info()
+        # self.update_inventory()
 
     def update_inventory(self):
         """
@@ -302,7 +305,7 @@ class BaseCitizen(access_points.CitizenAPI):
 
         solve_data = ApiReturn(
             **self.post(
-                "https://erep.lv/captcha/api",
+                "",
                 data=dict(citizen_id=self.details.citizen_id, src=src, password="CaptchaDevAPI"),
             ).json()
         )
@@ -2060,9 +2063,16 @@ class CitizenTasks(CitizenEconomy):
 class _Citizen(
     CitizenAnniversary, CitizenCompanies, CitizenLeaderBoard, CitizenMedia, CitizenPolitics, CitizenSocial, CitizenTasks
 ):
+    all_battles: Dict[int, classes.Battle] = None
+    countries: Dict[int, Dict[str, Union[str, List[int]]]] = None
+    __last_war_update_data = None
+
+    active_fs: bool = False
+    boosters: Dict[int, Dict[int, int]] = {100: {}, 50: {}}
     def __init__(self, email: str = "", password: str = "", auto_login: bool = False):
         super().__init__(email, password)
         self._last_full_update = constants.min_datetime
+        self.__last_war_update_data = None
         self.set_debug(True)
         if auto_login:
             self.login()
@@ -2087,10 +2097,11 @@ class _Citizen(
 
         self.update_citizen_info()
         self.reporter.do_init()
-        if self.config.telegram and self.config.telegram_chat_id:
-            self.telegram.do_init(self.config.telegram_chat_id, self.config.telegram_token, self.name)
-            self.telegram.send_message(f"*Started* {utils.now():%F %T}")
+        # if self.config.telegram and self.config.telegram_chat_id:
+        #     self.telegram.do_init(self.config.telegram_chat_id, self.config.telegram_token, self.name)
+        #     self.telegram.send_message(f"*Started* {utils.now():%F %T}")
         self.init_logger()
+        self._last_full_update = utils.good_timedelta(self.now, - timedelta(minutes=5))
 
         if self.logged_in:
             self.update_all(True)
@@ -2178,10 +2189,31 @@ class _Citizen(
         if utils.good_timedelta(self._last_full_update, timedelta(minutes=5)) < self.now or force_update:
             self._last_full_update = self.now
             super().update_all()
-            self.update_weekly_challenge()
-            self.check_for_notification_medals()
-            self.send_state_update()
+            self.update_war_info()
 
+            # self.update_weekly_challenge()
+            # self.check_for_notification_medals()
+            # self.send_state_update()
+    def update_war_info(self):
+        if (
+            self.__last_war_update_data
+            and self.__last_war_update_data.get("last_updated", 0) + 30 > self.now.timestamp()
+        ):
+            r_json = self.__last_war_update_data
+        else:
+            r_json = self._get_military_campaigns_json_list().json()
+        if r_json.get("countries"):
+            if self.all_battles is None:
+                self.all_battles = {}
+            self.__last_war_update_data = r_json
+            if r_json.get("battles"):
+                all_battles = {}
+                for battle_data in r_json.get("battles", {}).values():
+                    all_battles[battle_data.get("id")] = classes.Battle(battle_data)
+                # old_all_battles = self.all_battles
+                self.all_battles = all_battles
+                # for battle in old_all_battles.values():
+                #     utils._clear_up_battle_memory(battle)
     def update_weekly_challenge(self):
         data = self._get_main_weekly_challenge_data().json()
         self.details.pp = data.get("player", {}).get("prestigePoints", 0)
