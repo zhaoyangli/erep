@@ -58,10 +58,10 @@ Ready to contribute? Here's how to set up `erepublik` for local development.
 
     $ git clone git@github.com:your_name_here/erepublik.git
 
-3. Install your local copy into a virtualenv. Assuming you have virtualenvwrapper installed, this is how you set up your fork for local development::
+3. This is how you set up your fork for local development::
 
-    $ mkvirtualenv erepublik
     $ cd erepublik/
+    $ python3 -m venv venv
     $ python setup.py develop
 
 4. Create a branch for local development::
@@ -70,14 +70,13 @@ Ready to contribute? Here's how to set up `erepublik` for local development.
 
    Now you can make your changes locally.
 
-5. When you're done making changes, check that your changes pass flake8 and the
-   tests, including testing other Python versions with tox::
+5. When you're done making changes, check that your changes pass flake8, isort and the
+   tests::
 
-    $ flake8 erepublik tests
-    $ python setup.py test or py.test
-    $ tox
+    $ make lint
+    $ python setup.py test
 
-   To get flake8 and tox, just pip install them into your virtualenv.
+   To get flake8 and isort, just pip install them into your virtualenv.
 
 6. Commit your changes and push your branch to GitHub::
 
@@ -115,8 +114,6 @@ A reminder for the maintainers on how to deploy.
 Make sure all your changes are committed (including an entry in HISTORY.rst).
 Then run::
 
-$ bumpversion patch # possible: major / minor / patch
+$ bumpversion patch # possible: major / minor / patch / dev
 $ git push
 $ git push --tags
-
-Travis will then deploy to PyPI if tests pass.

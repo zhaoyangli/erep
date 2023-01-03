@@ -14,8 +14,9 @@ eRepublik script
 Python package for automated eRepublik playing
 
 
-* Free software: MIT license
+* Free software: GPLv3.0
 * Documentation: https://erepublik.readthedocs.io/en/latest/
+* Source code: https://github.com/eeriks/erepublik
 
 
 Features

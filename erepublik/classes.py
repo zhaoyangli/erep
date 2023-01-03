@@ -1,20 +1,38 @@
 import datetime
-import decimal
 import hashlib
-import random
 import threading
-import time
-from collections import defaultdict, deque
-from typing import Any, Dict, Iterable, List, Mapping, Tuple, Union
+import warnings
+import weakref
+from decimal import Decimal
+from io import BytesIO
+from typing import Any, Dict, Generator, Iterable, List, NamedTuple, NoReturn, Optional, Tuple, Union
 
-from requests import Response, Session, post
+from requests import HTTPError, Response, Session, post
 
-from erepublik import utils
+from erepublik import _types as types
+from erepublik import constants, utils
 
-try:
-    import simplejson as json
-except ImportError:
-    import json
+__all__ = [
+    "Battle",
+    "BattleDivision",
+    "BattleSide",
+    "Company",
+    "Config",
+    "Details",
+    "Energy",
+    "ErepublikException",
+    "ErepublikNetworkException",
+    "CloudFlareSessionError",
+    "CaptchaSessionError",
+    "EnergyToFight",
+    "Holding",
+    "Inventory",
+    "MyCompanies",
+    "OfferItem",
+    "Politics",
+    "Reporter",
+    "TelegramReporter",
+]
 
 
 class ErepublikException(Exception):
@@ -28,271 +46,414 @@ class ErepublikNetworkException(ErepublikException):
         self.request = request
 
 
+class CloudFlareSessionError(ErepublikNetworkException):
+    pass
+
+
+class CaptchaSessionError(ErepublikNetworkException):
+    pass
+
+
+class Holding:
+    id: int
+    region: int
+    companies: List["Company"]
+    name: str
+    _citizen = weakref.ReferenceType
+
+    def __init__(self, _id: int, region: int, citizen, name: str = None):
+        self._citizen = weakref.ref(citizen)
+        self.id: int = _id
+        self.region: int = region
+        self.companies: List["Company"] = list()
+        if name:
+            self.name = name
+        else:
+            comp_sum = len(self.companies)
+            name = f"Holding (#{self.id}) with {comp_sum} "
+            if comp_sum == 1:
+                name += "company"
+            else:
+                name += "companies"
+            self.name = name
+
+    @property
+    def wam_count(self) -> int:
+        return len([1 for company in self.companies if company.wam_enabled and not company.already_worked])
+
+    @property
+    def wam_companies(self) -> Iterable["Company"]:
+        return [company for company in self.companies if company.wam_enabled]
+
+    @property
+    def employable_companies(self) -> Iterable["Company"]:
+        return [company for company in self.companies if company.preset_works]
+
+    def add_company(self, company: "Company") -> NoReturn:
+        self.companies.append(company)
+        self.companies.sort()
+
+    def get_wam_raw_usage(self) -> Dict[str, Decimal]:
+        frm = Decimal("0.00")
+        wrm = Decimal("0.00")
+        for company in self.wam_companies:
+            if company.industry in [1, 7, 8, 9, 10, 11]:
+                frm += company.raw_usage
+            elif company.industry in [2, 12, 13, 14, 15, 16]:
+                wrm += company.raw_usage
+        return dict(frm=frm, wrm=wrm)
+
+    def get_wam_companies(self, raw_factory: bool = None) -> List["Company"]:
+        raw = []
+        factory = []
+        for company in self.wam_companies:
+            if not company.already_worked and not company.cannot_wam_reason == "war":
+                if company.is_raw:
+                    raw.append(company)
+                else:
+                    factory.append(company)
+        if raw_factory is None:
+            return raw + factory
+        else:
+            return raw if raw_factory else factory
+
+    def __str__(self) -> str:
+        comp = len(self.companies)
+        name = f"Holding (#{self.id}) with {comp} "
+        if comp == 1:
+            name += "company"
+        else:
+            name += "companies"
+        return name
+
+    def __repr__(self):
+        return str(self)
+
+    @property
+    def as_dict(self) -> Dict[str, Union[str, int, List[Dict[str, Union[str, int, bool, float, Decimal]]]]]:
+        return dict(
+            name=self.name,
+            id=self.id,
+            region=self.region,
+            companies=[c.as_dict for c in self.companies],
+            wam_count=self.wam_count,
+        )
+
+    @property
+    def citizen(self):
+        return self._citizen()
+
+
+class Company:
+    _holding: weakref.ReferenceType
+    holding: Holding
+    id: int
+    quality: int
+    is_raw: bool
+    raw_usage: Decimal
+    products_made: Decimal
+    wam_enabled: bool
+    can_wam: bool
+    cannot_wam_reason: str
+    industry: int
+    already_worked: bool
+    preset_works: int
+
+    def __init__(
+        self,
+        holding: Holding,
+        _id: int,
+        quality: int,
+        is_raw: bool,
+        effective_bonus: Decimal,
+        raw_usage: Decimal,
+        base_production: Decimal,
+        wam_enabled: bool,
+        can_wam: bool,
+        cannot_wam_reason: str,
+        industry: int,
+        already_worked: bool,
+        preset_works: int,
+    ):
+        self._holding = weakref.ref(holding)
+        self.id: int = _id
+        self.industry: int = industry
+        self.quality: int = self._get_real_quality(quality)
+        self.is_raw: bool = is_raw
+        self.wam_enabled: bool = wam_enabled
+        self.can_wam: bool = can_wam
+        self.cannot_wam_reason: str = cannot_wam_reason
+        self.already_worked: bool = already_worked
+        self.preset_works: int = preset_works
+
+        self.products_made = self.raw_usage = Decimal(base_production) * Decimal(effective_bonus)
+        if not self.is_raw:
+            self.raw_usage = -self.products_made * raw_usage
+
+    def _get_real_quality(self, quality) -> int:
+        #  7: 'FRM q1',  8: 'FRM q2',  9: 'FRM q3', 10: 'FRM q4', 11: 'FRM q5',
+        # 12: 'WRM q1', 13: 'WRM q2', 14: 'WRM q3', 15: 'WRM q4', 16: 'WRM q5',
+        # 18: 'HRM q1', 19: 'HRM q2', 20: 'HRM q3', 21: 'HRM q4', 22: 'HRM q5',
+        # 24: 'ARM q1', 25: 'ARM q2', 26: 'ARM q3', 27: 'ARM q4', 28: 'ARM q5',
+        if 7 <= self.industry <= 11:
+            return self.industry % 6
+        elif 12 <= self.industry <= 16:
+            return self.industry % 11
+        elif 18 <= self.industry <= 22:
+            return self.industry % 17
+        elif 24 <= self.industry <= 28:
+            return self.industry % 23
+        else:
+            return quality
+
+    @property
+    def _internal_industry(self) -> int:
+        #  7: 'FRM q1',  8: 'FRM q2',  9: 'FRM q3', 10: 'FRM q4', 11: 'FRM q5',
+        # 12: 'WRM q1', 13: 'WRM q2', 14: 'WRM q3', 15: 'WRM q4', 16: 'WRM q5',
+        # 18: 'HRM q1', 19: 'HRM q2', 20: 'HRM q3', 21: 'HRM q4', 22: 'HRM q5',
+        # 24: 'ARM q1', 25: 'ARM q2', 26: 'ARM q3', 27: 'ARM q4', 28: 'ARM q5',
+        if 7 <= self.industry <= 11:
+            return 7
+        elif 12 <= self.industry <= 16:
+            return 12
+        elif 18 <= self.industry <= 22:
+            return 18
+        elif 24 <= self.industry <= 28:
+            return 24
+        else:
+            return self.industry
+
+    @property
+    def _sort_keys(self):
+        return not self.is_raw, self._internal_industry, self.quality, self.id
+
+    def __hash__(self):
+        return hash(self._sort_keys)
+
+    def __lt__(self, other: "Company"):
+        return self._sort_keys < other._sort_keys
+
+    def __le__(self, other: "Company"):
+        return self._sort_keys <= other._sort_keys
+
+    def __gt__(self, other: "Company"):
+        return self._sort_keys > other._sort_keys
+
+    def __ge__(self, other: "Company"):
+        return self._sort_keys >= other._sort_keys
+
+    def __eq__(self, other: "Company"):
+        return self._sort_keys == other._sort_keys
+
+    def __ne__(self, other: "Company"):
+        return self._sort_keys != other._sort_keys
+
+    def __str__(self):
+        name = f"(#{self.id:>9d}) {constants.INDUSTRIES[self.industry]}"
+        if not self.is_raw:
+            name += f" q{self.quality}"
+        return name
+
+    def __repr__(self):
+        return str(self)
+
+    @property
+    def as_dict(self) -> Dict[str, Union[str, int, bool, float, Decimal]]:
+        return dict(
+            name=str(self),
+            holding=self.holding.id,
+            id=self.id,
+            quality=self.quality,
+            is_raw=self.is_raw,
+            raw_usage=self.raw_usage,
+            products_made=self.products_made,
+            wam_enabled=self.wam_enabled,
+            can_wam=self.can_wam,
+            cannot_wam_reason=self.cannot_wam_reason,
+            industry=self.industry,
+            already_worked=self.already_worked,
+            preset_works=self.preset_works,
+        )
+
+    def dissolve(self) -> Response:
+        self.holding.citizen.write_log(f"{self} dissolved!")
+        # noinspection PyProtectedMember
+        return self.holding.citizen._post_economy_sell_company(self.id, self.holding.citizen.details.pin, sell=False)
+
+    def upgrade(self, level: int) -> Response:
+        # noinspection PyProtectedMember
+        return self.holding.citizen._post_economy_upgrade_company(self.id, level, self.holding.citizen.details.pin)
+
+    @property
+    def holding(self) -> Holding:
+        return self._holding()
+
+
 class MyCompanies:
     work_units: int = 0
     next_ot_time: datetime.datetime
-    holdings: Dict[int, Dict] = None
-    companies: Dict[int, Dict] = None
     ff_lockdown: int = 0
 
-    def __init__(self):
+    holdings: Dict[int, Holding]
+    _companies: weakref.WeakSet
+    _citizen: weakref.ReferenceType
+    companies: Generator[Company, None, None]
+    _frm_fab_ids = (1, 7, 8, 9, 10, 11)
+    _wrm_fab_ids = (2, 12, 13, 14, 15, 16)
+    _hrm_fab_ids = (4, 18, 19, 20, 21, 22)
+    _arm_fab_ids = (23, 24, 25, 26, 27, 28)
+
+    def __init__(self, citizen):
+        self._citizen = weakref.ref(citizen)
         self.holdings = dict()
-        self.companies = dict()
+        self._companies = weakref.WeakSet()
         self.next_ot_time = utils.now()
 
-    def prepare_holdings(self, holdings: dict):
+    def prepare_holdings(self, holdings: Dict[str, Dict[str, Any]]):
         """
         :param holdings: Parsed JSON to dict from en/economy/myCompanies
         """
-        self.holdings.clear()
-        template = dict(id=0, num_factories=0, region_id=0, companies=[])
+        for holding in holdings.values():
+            if holding.get("id") not in self.holdings:
+                self.holdings.update(
+                    {
+                        int(holding.get("id")): Holding(
+                            holding["id"], holding["region_id"], self.citizen, holding["name"]
+                        )
+                    }
+                )
+        if not self.holdings.get(0):
+            self.holdings.update({0: Holding(0, 0, self.citizen, "Unassigned")})  # unassigned
 
-        for holding_id, holding in holdings.items():
-            tmp: Dict[str, Union[Iterable[Any], Any]] = {}
-            for key in template:
-                if key == 'companies':
-                    tmp.update({key: []})
-                else:
-                    tmp.update({key: holding[key]})
-            self.holdings.update({int(holding_id): tmp})
-        self.holdings.update({0: template})  # unassigned
-
-    def prepare_companies(self, companies: dict):
+    def prepare_companies(self, companies: Dict[str, Dict[str, Any]]):
         """
         :param companies: Parsed JSON to dict from en/economy/myCompanies
         """
-        self.companies.clear()
-        template = dict(id=None, quality=0, is_raw=False, resource_bonus=0, effective_bonus=0, raw_usage=0,
-                        base_production=0, wam_enabled=False, can_work_as_manager=False, industry_id=0, todays_works=0,
-                        preset_own_work=0, already_worked=False, can_assign_employees=False, preset_works=0,
-                        holding_company_id=None, is_assigned_to_holding=False, cannot_work_as_manager_reason=False)
-
-        for c_id, company in companies.items():
-            tmp = {}
-            for key in template.keys():
-                if key in ['id', 'holding_company_id']:
-                    company[key] = int(company[key])
-                elif key == "raw_usage":
-                    if not company.get("is_raw") and company.get('upgrades'):
-                        company[key] = company.get('upgrades').get(str(company["quality"])).get('raw_usage')
-                tmp.update({key: company[key]})
-            self.companies.update({int(c_id): tmp})
-
-    def update_holding_companies(self):
-        for company_id, company_data in self.companies.items():
-            if company_id not in self.holdings[company_data['holding_company_id']]['companies']:
-                self.holdings[company_data['holding_company_id']]['companies'].append(company_id)
-        for holding_id in self.holdings:
-            self.holdings[holding_id]['companies'].sort()
+        self.__clear_data()
+        for company_dict in companies.values():
+            holding = self.holdings.get(int(company_dict["holding_company_id"]))
+            quality = company_dict.get("quality")
+            is_raw = company_dict.get("is_raw")
+            if is_raw:
+                raw_usage = Decimal("0.0")
+            else:
+                raw_usage = Decimal(str(company_dict.get("upgrades").get(str(quality)).get("raw_usage")))
+            company = Company(
+                holding,
+                company_dict.get("id"),
+                quality,
+                is_raw,
+                Decimal(str(company_dict.get("effective_bonus"))) / 100,
+                raw_usage,
+                Decimal(str(company_dict.get("base_production"))),
+                company_dict.get("wam_enabled"),
+                company_dict.get("can_work_as_manager"),
+                company_dict.get("cannot_work_as_manager_reason"),
+                company_dict.get("industry_id"),
+                company_dict.get("already_worked"),
+                company_dict.get("preset_works"),
+            )
+            self._companies.add(company)
+            holding.add_company(company)
 
     def get_employable_factories(self) -> Dict[int, int]:
-        ret = {}
-        for company_id, company in self.companies.items():
-            if company.get('preset_works'):
-                preset_works: int = int(company.get('preset_works', 0))
-                ret.update({company_id: preset_works})
-        return ret
+        return {company.id: company.preset_works for company in self.companies if company.preset_works}
 
     def get_total_wam_count(self) -> int:
-        ret = 0
-        for holding_id in self.holdings:
-            ret += self.get_holding_wam_count(holding_id)
-        return ret
+        return sum([holding.wam_count for holding in self.holdings.values()])
 
-    def get_holding_wam_count(self, holding_id: int, raw_factory=None) -> int:
-        """
-        Returns amount of wam enabled companies in the holding
-        :param holding_id: holding id
-        :param raw_factory: True - only raw, False - only factories, None - both
-        :return: int
-        """
-        return len(self.get_holding_wam_companies(holding_id, raw_factory))
-
-    def get_holding_employee_count(self, holding_id):
-        employee_count = 0
-        if holding_id in self.holdings:
-            for company_id in self.holdings.get(holding_id, {}).get('companies', []):
-                employee_count += self.companies.get(company_id).get('preset_works', 0)
-        return employee_count
-
-    def get_holding_wam_companies(self, holding_id: int, raw_factory: bool = None) -> List[int]:
-        """
-        Returns WAM enabled companies in the holding, True - only raw, False - only factories, None - both
-        :param holding_id: holding id
-        :param raw_factory: bool or None
-        :return: list
-        """
-        raw = []
-        factory = []
-        if holding_id in self.holdings:
-            for company_id in sorted(self.holdings.get(holding_id, {}).get('companies', []),
-                                     key=lambda cid: (-self.companies[cid].get('is_raw'),  # True, False
-                                                      self.companies[cid].get('industry_id'),  # F W H A
-                                                      -self.companies[cid].get('quality'),)):  # 7, 6, .. 2, 1
-                company = self.companies.get(company_id, {})
-                wam_enabled = bool(company.get('wam_enabled', {}))
-                already_worked = not company.get('already_worked', {})
-                cannot_work_war = company.get("cannot_work_as_manager_reason", {}) == "war"
-                if wam_enabled and already_worked and not cannot_work_war:
-                    if company.get('is_raw', False):
-                        raw.append(company_id)
-                    else:
-                        factory.append(company_id)
-        if raw_factory is not None and not raw_factory:
-            return factory
-        elif raw_factory is not None and raw_factory:
-            return raw
-        elif raw_factory is None:
-            return raw + factory
+    @staticmethod
+    def get_needed_inventory_usage(companies: Union[Company, Iterable[Company]]) -> Decimal:
+        if isinstance(companies, list):
+            return sum(company.products_made * (100 if company.is_raw else 1) for company in companies)
         else:
-            raise ErepublikException("raw_factory should be True/False/None")
+            return companies.products_made
 
-    def get_needed_inventory_usage(self, company_id: int = None, companies: list = None) -> float:
-        if not any([companies, company_id]):
-            return 0.
-        if company_id:
-            if company_id not in self.companies:
-                raise ErepublikException("Company ({}) not in all companies list".format(company_id))
-            company = self.companies[company_id]
-            if company.get("is_raw"):
-                return float(company["base_production"]) * company["effective_bonus"]
+    def remove_factory_from_wam_list(self, raw_factories, final_factories):
+        frm, wrm, *_ = self.get_raw_usage_for_companies(*final_factories, *raw_factories)
+        inv_raw = self.citizen.inventory.raw
+        for raw, ids, exc in [(frm, self._frm_fab_ids, False), (wrm, self._wrm_fab_ids, False), (None, None, True)]:
+            if exc:
+                if final_factories:
+                    final_factories.sort(key=lambda c: c.raw_usage)
+                    return final_factories.pop(-1)
+                elif raw_factories:
+                    raw_factories.sort(key=lambda c: c.raw_usage)
+                    return raw_factories.pop(-1)
             else:
-                products_made = company["base_production"] * company["effective_bonus"] / 100
-                # raw_used = products_made * company['upgrades'][str(company['quality'])]['raw_usage'] * 100
-                return float(products_made - company['raw_usage'])
-        if companies:
-            return float(sum([self.get_needed_inventory_usage(company_id=cid) for cid in companies]))
+                if raw:
+                    raw += Decimal(
+                        inv_raw.get(constants.INDUSTRIES[ids[1]], {}).get(0, {}).get("amount", Decimal("0.0"))
+                    )
+                    if raw > 0:
+                        to_remove = sorted(raw_factories, key=lambda c: (c.industry not in ids, c.raw_usage))
+                        if to_remove:
+                            return raw_factories.pop(raw_factories.index(to_remove[0]))
+                    else:
+                        to_remove = sorted(final_factories, key=lambda c: (c.industry != ids[0], c.raw_usage))
+                        if to_remove:
+                            return final_factories.pop(final_factories.index(to_remove[0]))
 
-        raise ErepublikException("Wrong function call")
-
-    def get_wam_raw_usage(self) -> Dict[str, float]:
-        frm = 0.00
-        wrm = 0.00
-        for company in self.companies.values():
-            if company['wam_enabled']:
-                effective_bonus = float(company["effective_bonus"])
-                base_prod = float(company["base_production"])
-                raw = base_prod * effective_bonus / 100
-                if not company["is_raw"]:
-                    raw *= -company["raw_usage"]
-                if company["industry_id"] in [1, 7, 8, 9, 10, 11]:
-                    frm += raw
-                elif company["industry_id"] in [2, 12, 13, 14, 15, 16]:
-                    wrm += raw
-        return {'frm': int(frm * 1000) / 1000, 'wrm': int(wrm * 1000) / 1000}
-
-    def __str__(self):
-        name = []
-        for holding_id in sorted(self.holdings.keys()):
-            if not holding_id:
-                name.append(f"Unassigned - {len(self.holdings[0]['companies'])}")
-            else:
-                name.append(f"{holding_id} - {len(self.holdings[holding_id]['companies'])}")
-        return " | ".join(name)
-
-    # @property
-    # def __dict__(self):
-    #     ret = {}
-    #     for key in dir(self):
-    #         if not key.startswith('_'):
-    #             ret[key] = getattr(self, key)
-    #     return ret
-
-
-class SlowRequests(Session):
-    last_time: datetime.datetime
-    timeout = datetime.timedelta(milliseconds=500)
-    uas = [
-        # Chrome
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/79.0.3945.88 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/77.0.3865.90 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/76.0.3809.132 Safari/537.36',
-        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/79.0.3945.88 Safari/537.36',
-        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/77.0.3865.90 Safari/537.36',
-        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/76.0.3809.132 Safari/537.36',
-        # FireFox
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:70.0) Gecko/20100101 Firefox/70.0',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:69.0) Gecko/20100101 Firefox/69.0',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:68.0) Gecko/20100101 Firefox/68.0',
-        'Mozilla/5.0 (X11; Linux x86_64; rv:70.0) Gecko/20100101 Firefox/70.0',
-        'Mozilla/5.0 (X11; Linux x86_64; rv:69.0) Gecko/20100101 Firefox/69.0',
-        'Mozilla/5.0 (X11; Linux x86_64; rv:68.0) Gecko/20100101 Firefox/68.0',
-    ]
-    debug = False
-
-    def __init__(self):
-        super().__init__()
-        self.request_log_name = utils.get_file(utils.now().strftime("debug/requests_%Y-%m-%d.log"))
-        self.last_time = utils.now()
-        self.headers.update({
-            'User-Agent': random.choice(self.uas)
-        })
+    def get_raw_usage_for_companies(self, *companies: Company) -> Tuple[Decimal, Decimal, Decimal, Decimal]:
+        frm = wrm = hrm = arm = Decimal("0.00")
+        for company in companies:
+            if company.industry in self._frm_fab_ids:
+                frm += company.raw_usage
+            elif company.industry in self._wrm_fab_ids:
+                wrm += company.raw_usage
+            elif company.industry in self._hrm_fab_ids:
+                hrm += company.raw_usage
+            elif company.industry in self._arm_fab_ids:
+                arm += company.raw_usage
+        return frm, wrm, hrm, arm
 
     @property
-    def __dict__(self):
-        return dict(last_time=self.last_time, timeout=self.timeout, user_agent=self.headers['User-Agent'],
-                    request_log_name=self.request_log_name, debug=self.debug)
+    def companies(self) -> Generator[Company, None, None]:
+        return (c for c in self._companies)
 
-    def request(self, method, url, *args, **kwargs):
-        self._slow_down_requests()
-        self._log_request(url, method, **kwargs)
-        resp = super().request(method, url, *args, **kwargs)
-        self._log_response(url, resp)
-        return resp
+    def get_wam_holdings(self) -> Generator[Holding, None, None]:
+        for holding in sorted(
+            self.holdings.values(), key=lambda h: (-len(h.get_wam_companies(False)), -len(h.get_wam_companies()))
+        ):
+            yield holding
 
-    def _slow_down_requests(self):
-        ltt = utils.good_timedelta(self.last_time, self.timeout)
-        if ltt > utils.now():
-            seconds = (ltt - utils.now()).total_seconds()
-            time.sleep(seconds if seconds > 0 else 0)
-        self.last_time = utils.now()
+    def __str__(self):
+        return f"MyCompanies: {sum(1 for _ in self.companies)} companies in {len(self.holdings)} holdings"
 
-    def _log_request(self, url, method, data=None, json=None, params=None, **kwargs):
-        if self.debug:
-            args = {}
-            kwargs.pop('allow_redirects', None)
-            if kwargs:
-                args.update({'kwargs': kwargs})
+    def __repr__(self):
+        return str(self)
 
-            if data:
-                args.update({"data": data})
+    def __clear_data(self):
+        for holding in self.holdings.values():
+            for company in holding.companies:  # noqa
+                del company
+            holding.companies.clear()
+        self._companies.clear()
 
-            if json:
-                args.update({"json": json})
+    @property
+    def as_dict(
+        self,
+    ) -> Dict[
+        str,
+        Union[
+            str,
+            int,
+            datetime.datetime,
+            Dict[str, Dict[str, Union[str, int, List[Dict[str, Union[str, int, bool, float, Decimal]]]]]],
+        ],
+    ]:
+        return dict(
+            name=str(self),
+            work_units=self.work_units,
+            next_ot_time=self.next_ot_time,
+            ff_lockdown=self.ff_lockdown,
+            holdings={str(hi): h.as_dict for hi, h in self.holdings.items()},
+            company_count=sum(1 for _ in self.companies),
+        )
 
-            if params:
-                args.update({"params": params})
-
-            body = "[{dt}]\tURL: '{url}'\tMETHOD: {met}\tARGS: {args}\n".format(dt=utils.now().strftime("%F %T"),
-                                                                                url=url, met=method, args=args)
-            utils.get_file(self.request_log_name)
-            with open(self.request_log_name, 'ab') as file:
-                file.write(body.encode("UTF-8"))
-
-    def _log_response(self, url, resp, redirect: bool = False):
-        from erepublik import Citizen
-        if self.debug:
-            if resp.history and not redirect:
-                for hist_resp in resp.history:
-                    self._log_request(hist_resp.request.url, "REDIRECT")
-                    self._log_response(hist_resp.request.url, hist_resp, redirect=True)
-
-            file_data = {
-                "path": 'debug/requests',
-                "time": self.last_time.strftime('%Y/%m/%d/%H-%M-%S'),
-                "name": utils.slugify(url[len(Citizen.url):]),
-                "extra": "_REDIRECT" if redirect else ""
-            }
-
-            try:
-                json.loads(resp.text)
-                file_data.update({"ext": "json"})
-            except json.JSONDecodeError:
-                file_data.update({"ext": "html"})
-
-            filename = 'debug/requests/{time}_{name}{extra}.{ext}'.format(**file_data)
-            with open(utils.get_file(filename), 'wb') as f:
-                f.write(resp.text.encode('utf-8'))
+    @property
+    def citizen(self):
+        return self._citizen()
 
 
 class Config:
@@ -301,101 +462,134 @@ class Config:
     work = True
     train = True
     wam = False
+    ot = True
     auto_sell: List[str] = None
     auto_sell_all = False
     employees = False
-    fight = False
-    air = False
-    ground = False
-    all_in = False
-    next_energy = False
-    boosters = False
-    travel_to_fight = False
-    always_travel = False
-    epic_hunt = False
-    epic_hunt_ebs = False
-    rw_def_side = False
     interactive = True
-    continuous_fighting = False
     auto_buy_raw = False
     force_wam = False
-    sort_battles_time = True
-    force_travel = False
     telegram = True
     telegram_chat_id = 0
     telegram_token = ""
+    spin_wheel_of_fortune = False
+    # fight = False
+    # air = False
+    # ground = False
+    # all_in = False
+    # next_energy = False
+    # boosters = False
+    # travel_to_fight = False
+    # always_travel = False
+    # epic_hunt = False
+    # epic_hunt_ebs = False
+    # rw_def_side = False
+    # continuous_fighting = False
+    # sort_battles_time = True
+    # force_travel = False
+    # maverick = False
 
     def __init__(self):
         self.auto_sell = []
-
-    @property
-    def wt(self):
-        return self.work and self.train
 
     def reset(self):
         self.work = True
         self.train = True
         self.wam = False
+        self.ot = True
         self.auto_sell = list()
         self.auto_sell_all = False
         self.employees = False
-        self.fight = False
-        self.air = False
-        self.ground = False
-        self.all_in = False
-        self.next_energy = False
-        self.boosters = False
-        self.travel_to_fight = False
-        self.always_travel = False
-        self.epic_hunt = False
-        self.epic_hunt_ebs = False
-        self.rw_def_side = False
         self.interactive = True
-        self.continuous_fighting = False
         self.auto_buy_raw = False
         self.force_wam = False
-        self.sort_battles_time = True
-        self.force_travel = False
         self.telegram = True
         self.telegram_chat_id = 0
         self.telegram_token = ""
+        self.spin_wheel_of_fortune = False
+        # self.fight = False
+        # self.air = False
+        # self.ground = False
+        # self.all_in = False
+        # self.next_energy = False
+        # self.boosters = False
+        # self.travel_to_fight = False
+        # self.always_travel = False
+        # self.epic_hunt = False
+        # self.epic_hunt_ebs = False
+        # self.rw_def_side = False
+        # self.continuous_fighting = False
+        # self.sort_battles_time = True
+        # self.force_travel = False
+        # self.maverick = False
 
     @property
-    def __dict__(self):
-        return dict(email=self.email, work=self.work, train=self.train, wam=self.wam,
-                    auto_sell=self.auto_sell, auto_sell_all=self.auto_sell_all, employees=self.employees,
-                    fight=self.fight, air=self.air, ground=self.ground, all_in=self.all_in,
-                    next_energy=self.next_energy, boosters=self.boosters, travel_to_fight=self.travel_to_fight,
-                    always_travel=self.always_travel, epic_hunt=self.epic_hunt, epic_hunt_ebs=self.epic_hunt_ebs,
-                    rw_def_side=self.rw_def_side, interactive=self.interactive,
-                    continuous_fighting=self.continuous_fighting, auto_buy_raw=self.auto_buy_raw,
-                    force_wam=self.force_wam, sort_battles_time=self.sort_battles_time, force_travel=self.force_travel,
-                    telegram=self.telegram, telegram_chat_id=self.telegram_chat_id, telegram_token=self.telegram_token)
+    def as_dict(self) -> Dict[str, Union[bool, int, str, List[str]]]:
+        return dict(
+            email=self.email,
+            work=self.work,
+            train=self.train,
+            wam=self.wam,
+            ot=self.ot,
+            auto_sell=self.auto_sell,
+            auto_sell_all=self.auto_sell_all,
+            employees=self.employees,
+            interactive=self.interactive,
+            auto_buy_raw=self.auto_buy_raw,
+            force_wam=self.force_wam,
+            telegram=self.telegram,
+            telegram_chat_id=self.telegram_chat_id,
+            telegram_token=self.telegram_token,
+            spin_wheel_of_fortune=self.spin_wheel_of_fortune,
+            # fight=self.fight,
+            # air=self.air,
+            # ground=self.ground,
+            # all_in=self.all_in,
+            # next_energy=self.next_energy,
+            # travel_to_fight=self.travel_to_fight,
+            # always_travel=self.always_travel,
+            # epic_hunt=self.epic_hunt,
+            # epic_hunt_ebs=self.epic_hunt_ebs,
+            # rw_def_side=self.rw_def_side,
+            # maverick=self.maverick,
+            # continuous_fighting=self.continuous_fighting,
+            # sort_battles_time=self.sort_battles_time,
+            # force_travel=self.force_travel,
+        )
 
 
 class Energy:
     limit = 500  # energyToRecover
     interval = 10  # energyPerInterval
-    recoverable = 0  # energyFromFoodRemaining
-    recovered = 0  # energy
+    energy = 0  # energy
     _recovery_time = None
 
     def __init__(self):
         self._recovery_time = utils.now()
 
     def __repr__(self):
-        return "{:4}/{:4} + {:4}, {:3}hp/6min".format(self.recovered, self.limit, self.recoverable, self.interval)
+        return f"{self.energy:4}/{self.limit:4}, {self.interval:3}hp/6min"
+
+    @property
+    def recovered(self):
+        warnings.warn("Deprecated since auto auto-eat! Will be removed soon. Use Energy.energy", DeprecationWarning)
+        return self.energy
+
+    @property
+    def recoverable(self):
+        warnings.warn("Deprecated since auto auto-eat! Will be removed soon. Use Energy.energy", DeprecationWarning)
+        return 0
 
     def set_reference_time(self, recovery_time: datetime.datetime):
         self._recovery_time = recovery_time.replace(microsecond=0)
 
     @property
     def food_fights(self):
-        return self.available // 10
+        return self.energy // 10
 
     @property
     def reference_time(self):
-        if self.is_recovered_full or self._recovery_time < utils.now():
+        if self.is_energy_full or self._recovery_time < utils.now():
             ret = utils.now()
         else:
             ret = self._recovery_time
@@ -403,40 +597,62 @@ class Energy:
 
     @property
     def is_recoverable_full(self):
-        return self.recoverable >= self.limit - 5 * self.interval
+        warnings.warn(
+            "Deprecated since auto auto-eat! Will be removed soon. Use Energy.is_energy_full", DeprecationWarning
+        )
+        return self.is_energy_full
 
     @property
     def is_recovered_full(self):
-        return self.recovered >= self.limit - self.interval
+        warnings.warn(
+            "Deprecated since auto auto-eat! Will be removed soon. Use Energy.is_energy_full", DeprecationWarning
+        )
+        return self.is_energy_full
 
     @property
     def is_energy_full(self):
-        return self.is_recoverable_full and self.is_recovered_full
+        return self.energy >= self.limit - self.interval
 
     @property
     def available(self):
-        return self.recovered + self.recoverable
+        warnings.warn("Deprecated since auto auto-eat! Will be removed soon. Use Energy.energy", DeprecationWarning)
+        return self.energy
+
+    @property
+    def as_dict(self) -> Dict[str, Union[int, datetime.datetime, bool]]:
+        return dict(
+            limit=self.limit,
+            interval=self.interval,
+            energy=self.energy,
+            reference_time=self.reference_time,
+            food_fights=self.food_fights,
+            is_energy_full=self.is_energy_full,
+        )
 
 
 class Details:
-    xp = 0
-    cc = 0
-    pp = 0
-    pin = None
-    gold = 0
+    xp: int = 0
+    cc: float = 0
+    pp: int = 0
+    pin: str = None
+    gold: float = 0
+    level: int = 0
     next_pp: List[int] = None
-    citizen_id = 0
-    citizenship = 0
-    current_region = 0
-    current_country = 0
-    residence_region = 0
-    residence_country = 0
-    daily_task_done = False
-    daily_task_reward = False
-    mayhem_skills = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0, 8: 0, 9: 0, 10: 0, 11: 0, 12: 0, 13: 0, 14: 0, }
+    citizen_id: int = 0
+    citizenship: constants.Country
+    current_region: int = 0
+    current_country: constants.Country
+    residence_region: int = 0
+    residence_country: constants.Country
+    daily_task_done: bool = False
+    daily_task_reward: bool = False
+    mayhem_skills: Dict[int, int]
 
     def __init__(self):
         self.next_pp = []
+        self.mayhem_skills = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0, 8: 0, 9: 0, 10: 0, 11: 0, 12: 0, 13: 0, 14: 0}
+        _default_country = constants.Country(0, "Unknown", "Unknown", "XX")
+        self.citizenship = self.current_country = self.residence_country = _default_country
 
     @property
     def xp_till_level_up(self):
@@ -464,6 +680,32 @@ class Details:
             next_level_up = (1 + (self.xp // 10)) * 10
         return next_level_up - self.xp
 
+    @property
+    def as_dict(self) -> Dict[str, Union[int, float, str, constants.Country, bool]]:
+        return dict(
+            xp=self.xp,
+            cc=self.cc,
+            pp=self.pp,
+            pin=self.pin,
+            gold=self.gold,
+            next_pp=self.next_pp,
+            level=self.level,
+            citizen_id=self.citizen_id,
+            citizenship=self.citizenship,
+            current_region=self.current_region,
+            current_country=self.current_country,
+            residence_region=self.residence_region,
+            residence_country=self.residence_country,
+            daily_task_done=self.daily_task_done,
+            daily_task_reward=self.daily_task_reward,
+            mayhem_skills=self.mayhem_skills,
+            xp_till_level_up=self.xp_till_level_up,
+        )
+
+    @property
+    def is_elite(self):
+        return self.level > 100
+
 
 class Politics:
     is_party_member: bool = False
@@ -474,11 +716,22 @@ class Politics:
     is_congressman: bool = False
     is_country_president: bool = False
 
+    @property
+    def as_dict(self) -> Dict[str, Union[bool, int, str]]:
+        return dict(
+            is_party_member=self.is_party_member,
+            party_id=self.party_id,
+            party_slug=self.party_slug,
+            is_party_president=self.is_party_president,
+            is_congressman=self.is_congressman,
+            is_country_president=self.is_country_president,
+        )
+
 
 class House:
     quality = None
     unactivated_count = 0
-    active_untill = utils.good_timedelta(utils.now(), -datetime.timedelta(days=1))
+    active_until = utils.good_timedelta(utils.now(), -datetime.timedelta(days=1))
 
     def __init__(self, quality: int):
         if 0 < quality < 6:
@@ -486,657 +739,332 @@ class House:
 
     @property
     def next_ot_point(self) -> datetime.datetime:
-        return self.active_untill
-
-
-class CitizenAPI:
-    url: str = "https://www.erepublik.com/en"
-    _req: SlowRequests = None
-    token: str = ""
-
-    def __init__(self):
-        """
-Class for unifying eRepublik known endpoints and their required/optional parameters
-        """
-        self._req = SlowRequests()
-
-    def post(self, url: str, data=None, json=None, **kwargs) -> Response:
-        return self._req.post(url, data, json, **kwargs)
-
-    def get(self, url: str, **kwargs) -> Response:
-        return self._req.get(url, **kwargs)
-
-    def _get_main_article_json(self, article_id: int) -> Response:
-        return self.get("{}/main/articleJson/{}".format(self.url, article_id))
-
-    def _get_military_battlefield_choose_side(self, battle: int, side: int) -> Response:
-        return self.get("{}/military/battlefield-choose-side/{}/{}".format(self.url, battle, side))
-
-    def _get_military_show_weapons(self, battle: int) -> Response:
-        return self.get("{}/military/show-weapons".format(self.url), params={'_token': self.token, 'battleId': battle})
-
-    def _get_candidate_party(self, party_slug: str) -> Response:
-        return self.post("{}/candidate/{}".format(self.url, party_slug))
-
-    def _get_main_citizen_hovercard(self, citizen: int) -> Response:
-        return self.get("{}/main/citizen-hovercard/{}".format(self.url, citizen))
-
-    def _get_main_citizen_profile_json(self, player_id: int) -> Response:
-        return self.get("{}/main/citizen-profile-json/{}".format(self.url, player_id))
-
-    def _get_main_citizen_notifications(self) -> Response:
-        return self.get("{}/main/citizenDailyAssistant".format(self.url))
-
-    def _get_main_citizen_daily_assistant(self) -> Response:
-        return self.get("{}/main/citizenNotifications".format(self.url))
-
-    def _get_main_city_data_residents(self, city: int, page: int = 1, params: Mapping[str, Any] = None) -> Response:
-        if params is None:
-            params = {}
-        return self.get("{}/main/city-data/{}/residents".format(self.url, city), params={"currentPage": page, **params})
-
-    def _get_country_military(self, country: str) -> Response:
-        return self.get("{}/country/military/{}".format(self.url, country))
-
-    def _get_economy_citizen_accounts(self, organisation_id: int) -> Response:
-        return self.get("{}/economy/citizen-accounts/{}".format(self.url, organisation_id))
-
-    def _get_economy_inventory_items(self) -> Response:
-        return self.get("{}/economy/inventory-items/".format(self.url))
-
-    def _get_economy_job_market_json(self, country: int) -> Response:
-        return self.get("{}/economy/job-market-json/{}/1/desc".format(self.url, country))
-
-    def _get_economy_my_companies(self) -> Response:
-        return self.get("{}/economy/myCompanies".format(self.url))
-
-    def _get_economy_my_market_offers(self) -> Response:
-        return self.get("{}/economy/myMarketOffers".format(self.url))
-
-    def _get_main_job_data(self) -> Response:
-        return self.get("{}/main/job-data".format(self.url))
-
-    def _get_main_leaderboards_damage_aircraft_rankings(self, country: int, weeks: int = 0, mu: int = 0) -> Response:
-        data = (country, weeks, mu)
-        return self.get("{}/main/leaderboards-damage-aircraft-rankings/{}/{}/{}/0".format(self.url, *data))
-
-    def _get_main_leaderboards_damage_rankings(self, country: int, weeks: int = 0, mu: int = 0,
-                                               div: int = 0) -> Response:
-        data = (country, weeks, mu, div)
-        return self.get("{}/main/leaderboards-damage-rankings/{}/{}/{}/{}".format(self.url, *data))
-
-    def _get_main_leaderboards_kills_aircraft_rankings(self, country: int, weeks: int = 0, mu: int = 0) -> Response:
-        data = (country, weeks, mu)
-        return self.get("{}/main/leaderboards-kills-aircraft-rankings/{}/{}/{}/0".format(self.url, *data))
-
-    def _get_main_leaderboards_kills_rankings(self, country: int, weeks: int = 0, mu: int = 0,
-                                              div: int = 0) -> Response:
-        data = (country, weeks, mu, div)
-        return self.get("{}/main/leaderboards-kills-rankings/{}/{}/{}/{}".format(self.url, *data))
-
-    def _get_main(self) -> Response:
-        return self.get(self.url)
-
-    def _get_main_messages_paginated(self, page: int = 1) -> Response:
-        return self.get("{}/main/messages-paginated/{}".format(self.url, page))
-
-    def _get_military_campaigns(self) -> Response:
-        return self.get("{}/military/campaigns-new/".format(self.url))
-
-    def _get_military_campaigns_json_list(self) -> Response:
-        return self.get("{}/military/campaignsJson/list".format(self.url))
-
-    def _get_military_unit_data(self, unit_id: int, **kwargs) -> Response:
-        params = {"groupId": unit_id, "panel": "members", **kwargs}
-        return self.get("{}/military/military-unit-data/".format(self.url), params=params)
-
-    def _get_main_money_donation_accept(self, donation_id: int) -> Response:
-        return self.get("{}/main/money-donation/accept/{}".format(self.url, donation_id), params={"_token": self.token})
-
-    def _get_main_money_donation_reject(self, donation_id: int) -> Response:
-        return self.get("{}/main/money-donation/reject/{}".format(self.url, donation_id), params={"_token": self.token})
-
-    def _get_main_notifications_ajax_community(self, page: int = 1) -> Response:
-        return self.get("{}/main/notificationsAjax/community/{}".format(self.url, page))
-
-    def _get_main_notifications_ajax_system(self, page: int = 1) -> Response:
-        return self.get("{}/main/notificationsAjax/system/{}".format(self.url, page))
-
-    def _get_main_notifications_ajax_report(self, page: int = 1) -> Response:
-        return self.get("{}/main/notificationsAjax/report/{}".format(self.url, page))
-
-    def _get_main_party_members(self, party: int) -> Response:
-        return self.get("{}/main/party-members/{}".format(self.url, party))
-
-    def _get_main_rankings_parties(self, country: int) -> Response:
-        return self.get("{}/main/rankings-parties/1/{}".format(self.url, country))
-
-    def _get_main_training_grounds_json(self) -> Response:
-        return self.get("{}/main/training-grounds-json".format(self.url))
-
-    def _get_main_weekly_challenge_data(self) -> Response:
-        return self.get("{}/main/weekly-challenge-data".format(self.url))
-
-    def _get_wars_show(self, war_id: int) -> Response:
-        return self.get("{}/wars/show/{}".format(self.url, war_id))
-
-    def _post_main_activate_battle_effect(self, battle: int, kind: str, citizen_id: int) -> Response:
-        data = dict(battleId=battle, citizenId=citizen_id, type=kind, _token=self.token)
-        return self.post("{}/main/fight-activateBattleEffect".format(self.url), data=data)
-
-    def _post_main_article_comments(self, article: int, page: int = 1) -> Response:
-        data = dict(_token=self.token, articleId=article, page=page)
-        if page:
-            data.update({'page': page})
-        return self.post("{}/main/articleComments".format(self.url), data=data)
-
-    def _post_main_article_comments_create(self, message: str, article: int, parent: int = 0) -> Response:
-        data = dict(_token=self.token, message=message, articleId=article)
-        if parent:
-            data.update({"parentId": parent})
-        return self.post("{}/main/articleComments/create".format(self.url), data=data)
-
-    def _post_main_battlefield_travel(self, side_id: int, battle_id: int) -> Response:
-        data = dict(_token=self.token, sideCountryId=side_id, battleId=battle_id)
-        return self.post("{}/main/battlefieldTravel".format(self.url), data=data)
-
-    def _post_main_battlefield_change_division(self, battle_id: int, division_id: int) -> Response:
-        data = dict(_token=self.token, battleZoneId=division_id, battleId=battle_id)
-        return self.post("{}/main/battlefieldTravel".format(self.url), data=data)
-
-    def _post_main_buy_gold_items(self, currency: str, item: str, amount: int) -> Response:
-        data = dict(itemId=item, currency=currency, amount=amount, _token=self.token)
-        return self.post("{}/main/buyGoldItems".format(self.url), data=data)
-
-    def _post_candidate_for_congress(self, presentation: str = "") -> Response:
-        data = dict(_token=self.token, presentation=presentation)
-        return self.post("{}/candidate-for-congress".format(self.url), data=data)
-
-    def _post_main_citizen_add_remove_friend(self, citizen: int, add: bool) -> Response:
-        data = dict(_token=self.token, citizenId=citizen, url="//www.erepublik.com/en/main/citizen-addRemoveFriend")
-        if add:
-            data.update({"action": "addFriend"})
-        else:
-            data.update({"action": "removeFriend"})
-        return self.post("{}/main/citizen-addRemoveFriend".format(self.url), data=data)
-
-    def _post_main_collect_anniversary_reward(self) -> Response:
-        return self.post("{}/main/collect-anniversary-reward".format(self.url), data={"_token": self.token})
-
-    def _post_main_country_donate(self, country: int, action: str, value: Union[int, float],
-                                  quality: int = None) -> Response:
-        json = dict(countryId=country, action=action, _token=self.token, value=value, quality=quality)
-        return self.post("{}/main/country-donate".format(self.url), data=json,
-                         headers={"Referer": "{}/country/economy/Latvia".format(self.url)})
-
-    def _post_main_daily_task_reward(self) -> Response:
-        return self.post("{}/main/daily-tasks-reward".format(self.url), data=dict(_token=self.token))
-
-    def _post_main_donate_article(self, article_id: int, amount: int) -> Response:
-        data = dict(_token=self.token, articleId=article_id, amount=amount)
-        return self.post("{}/main/donate-article".format(self.url), data=data)
-
-    def _post_main_global_alerts_close(self, alert_id: int) -> Response:
-        data = dict(_token=self.token, alert_id=alert_id)
-        return self.post("{}/main/global-alerts/close".format(self.url), data=data)
-
-    def _post_delete_message(self, msg_id: list) -> Response:
-        data = {"_token": self.token, "delete_message[]": msg_id}
-        return self.post("{}/main/messages-delete".format(self.url), data)
-
-    def _post_eat(self, color: str) -> Response:
-        data = dict(_token=self.token, buttonColor=color)
-        return self.post("{}/main/eat".format(self.url), params=data)
-
-    def _post_economy_activate_booster(self, quality: int, duration: int, kind: str) -> Response:
-        data = dict(type=kind, quality=quality, duration=duration, fromInventory=True)
-        return self.post("{}/economy/activateBooster".format(self.url), data=data)
-
-    def _post_economy_activate_house(self, quality: int) -> Response:
-        data = {"action": "activate", "quality": quality, "type": "house", "_token": self.token}
-        return self.post("{}/economy/activateHouse".format(self.url), data=data)
-
-    def _post_economy_assign_to_holding(self, factory: int, holding: int) -> Response:
-        data = dict(_token=self.token, factoryId=factory, action="assign", holdingCompanyId=holding)
-        return self.post("{}/economy/assign-to-holding".format(self.url), data=data)
-
-    def _post_economy_create_company(self, industry: int, building_type: int = 1) -> Response:
-        data = {"_token": self.token, "company[industry_id]": industry, "company[building_type]": building_type}
-        return self.post("{}/economy/create-company".format(self.url), data=data,
-                         headers={"Referer": "{}/economy/create-company".format(self.url)})
-
-    def _post_economy_donate_items_action(self, citizen: int, amount: int, industry: int,
-                                          quality: int) -> Response:
-        data = dict(citizen_id=citizen, amount=amount, industry_id=industry, quality=quality, _token=self.token)
-        return self.post("{}/economy/donate-items-action".format(self.url), data=data,
-                         headers={"Referer": "{}/economy/donate-items/{}".format(self.url, citizen)})
-
-    def _post_economy_donate_money_action(self, citizen: int, amount: float = 0.0,
-                                          currency: int = 62) -> Response:
-        data = dict(citizen_id=citizen, _token=self.token, currency_id=currency, amount=amount)
-        return self.post("{}/economy/donate-money-action".format(self.url), data=data,
-                         headers={"Referer": "{}/economy/donate-money/{}".format(self.url, citizen)})
-
-    def _post_economy_exchange_purchase(self, amount: float, currency: int, offer: int) -> Response:
-        data = dict(_token=self.token, amount=amount, currencyId=currency, offerId=offer)
-        return self.post("{}/economy/exchange/purchase/".format(self.url), data=data)
-
-    def _post_economy_exchange_retrieve(self, personal: bool, page: int, currency: int) -> Response:
-        data = dict(_token=self.token, personalOffers=int(personal), page=page, currencyId=currency)
-        return self.post("{}/economy/exchange/retrieve/".format(self.url), data=data)
-
-    def _post_economy_game_tokens_market(self, action: str) -> Response:
-        assert action in ['retrieve', ]
-        data = dict(_token=self.token, action=action)
-        return self.post("{}/economy/gameTokensMarketAjax".format(self.url), data=data)
-
-    def _post_economy_job_market_apply(self, citizen: int, salary: int) -> Response:
-        data = dict(_token=self.token, citizenId=citizen, salary=salary)
-        return self.post("{}/economy/job-market-apply".format(self.url), data=data)
-
-    def _post_economy_marketplace(self, country: int, industry: int, quality: int,
-                                  order_asc: bool = True) -> Response:
-        data = dict(countryId=country, industryId=industry, quality=quality, ajaxMarket=1,
-                    orderBy="price_asc" if order_asc else "price_desc", _token=self.token)
-        return self.post("{}/economy/marketplaceAjax".format(self.url), data=data)
-
-    def _post_economy_marketplace_actions(self, amount: int, buy: bool = False, **kwargs) -> Response:
-        if buy:
-            data = dict(_token=self.token, offerId=kwargs['offer'], amount=amount, orderBy="price_asc", currentPage=1,
-                        buyAction=1)
-        else:
-            data = dict(_token=self.token, countryId=kwargs["country"], price=kwargs["price"],
-                        industryId=kwargs["industry"], quality=kwargs["quality"], amount=amount, sellAction='postOffer')
-        return self.post("{}/economy/marketplaceActions".format(self.url), data=data)
-
-    def _post_economy_resign(self) -> Response:
-        return self.post("{}/economy/resign".format(self.url),
-                         headers={"Content-Type": "application/x-www-form-urlencoded"},
-                         data={"_token": self.token, "action_type": "resign"})
-
-    def _post_economy_sell_company(self, factory: int, pin: int = None, sell: bool = True) -> Response:
-        data = dict(_token=self.token, pin="" if pin is None else pin)
-        if sell:
-            data.update({"sell": "sell"})
-        else:
-            data.update({"dissolve": factory})
-        return self.post("{}/economy/sell-company/{}".format(self.url, factory),
-                         data=data, headers={"Referer": self.url})
-
-    def _post_economy_train(self, tg_ids: List[int]) -> Response:
-        data: Dict[str, Union[int, str]] = {}
-        if not tg_ids:
-            return self._get_main_training_grounds_json()
-        else:
-            for idx, tg_id in enumerate(tg_ids):
-                data["grounds[%i][id]" % idx] = tg_id
-                data["grounds[%i][train]" % idx] = 1
-        if data:
-            data['_token'] = self.token
-        return self.post("{}/economy/train".format(self.url), data=data)
-
-    def _post_economy_upgrade_company(self, factory: int, level: int, pin: str = None) -> Response:
-        data = dict(_token=self.token, type="upgrade", companyId=factory, level=level, pin="" if pin is None else pin)
-        return self.post("{}/economy/upgrade-company".format(self.url), data=data)
-
-    def _post_economy_work(self, action_type: str, wam: List[int] = None, employ: Dict[int, int] = None) -> Response:
-        """
-        :return: requests.Response or None
-        """
-        if employ is None:
-            employ = dict()
-        if wam is None:
-            wam = []
-        data: Dict[str, Union[int, str]] = dict(action_type=action_type, _token=self.token)
-        if action_type == "production":
-            max_idx = 0
-            for company_id in sorted(wam or []):
-                data.update({
-                    "companies[%i][id]" % max_idx: company_id,
-                    "companies[%i][employee_works]" % max_idx: employ.pop(company_id, 0),
-                    "companies[%i][own_work]" % max_idx: 1
-                })
-                max_idx += 1
-            for company_id in sorted(employ or []):
-                data.update({
-                    "companies[%i][id]" % max_idx: company_id,
-                    "companies[%i][employee_works]" % max_idx: employ.pop(company_id),
-                    "companies[%i][own_work]" % max_idx: 0
-                })
-                max_idx += 1
-        return self.post("{}/economy/work".format(self.url), data=data)
-
-    def _post_economy_work_overtime(self) -> Response:
-        data = dict(action_type="workOvertime", _token=self.token)
-        return self.post("{}/economy/workOvertime".format(self.url), data=data)
-
-    def _post_forgot_password(self, email: str) -> Response:
-        data = dict(_token=self.token, email=email, commit="Reset password")
-        return self.post("{}/forgot-password".format(self.url), data=data)
-
-    def _post_military_fight_activate_booster(self, battle: int, quality: int, duration: int, kind: str) -> Response:
-        data = dict(type=kind, quality=quality, duration=duration, battleId=battle, _token=self.token)
-        return self.post("{}/military/fight-activateBooster".format(self.url), data=data)
-
-    def _post_military_change_weapon(self, battle: int, battle_zone: int, weapon_level: int,) -> Response:
-        data = dict(battleId=battle, _token=self.token, battleZoneId=battle_zone, customizationLevel=weapon_level)
-        return self.post("{}/military/change-weapon".format(self.url), data=data)
-
-    def _post_login(self, email: str, password: str) -> Response:
-        data = dict(csrf_token=self.token, citizen_email=email, citizen_password=password, remember='on')
-        return self.post("{}/login".format(self.url), data=data)
-
-    def _post_main_messages_alert(self, notification_ids: List[int]) -> Response:
-        data = {"_token": self.token, "delete_alerts[]": notification_ids, "deleteAllAlerts": "1", "delete": "Delete"}
-        return self.post("{}/main/messages-alerts/1".format(self.url), data=data)
-
-    def _post_main_messages_compose(self, subject: str, body: str, citizens: List[int]) -> Response:
-        url_pk = 0 if len(citizens) > 1 else str(citizens[0])
-        data = dict(citizen_name=",".join([str(x) for x in citizens]),
-                    citizen_subject=subject, _token=self.token, citizen_message=body)
-        return self.post("{}/main/messages-compose/{}".format(self.url, url_pk), data=data)
-
-    def _post_military_battle_console(self, battle_id: int, action: str, page: int = 1, **kwargs) -> Response:
-        data = dict(battleId=battle_id, action=action, _token=self.token)
-        if action == "battleStatistics":
-            data.update(round=kwargs["round_id"], zoneId=kwargs["round_id"], leftPage=page, rightPage=page,
-                        division=kwargs["division"], type=kwargs.get("type", 'damage'), )
-        elif action == "warList":
-            data.update(page=page)
-        return self.post("{}/military/battle-console".format(self.url), data=data)
-
-    def _post_military_deploy_bomb(self, battle_id: int, bomb_id: int) -> Response:
-        data = dict(battleId=battle_id, bombId=bomb_id, _token=self.token)
-        return self.post("{}/military/deploy-bomb".format(self.url), data=data)
-
-    def _post_military_fight_air(self, battle_id: int, side_id: int, zone_id: int) -> Response:
-        data = dict(sideId=side_id, battleId=battle_id, _token=self.token, battleZoneId=zone_id)
-        return self.post("{}/military/fight-shoooot/{}".format(self.url, battle_id), data=data)
-
-    def _post_military_fight_ground(self, battle_id: int, side_id: int, zone_id: int) -> Response:
-        data = dict(sideId=side_id, battleId=battle_id, _token=self.token, battleZoneId=zone_id)
-        return self.post("{}/military/fight-shooot/{}".format(self.url, battle_id), data=data)
-
-    def _post_military_group_missions(self) -> Response:
-        data = dict(action="check", _token=self.token)
-        return self.post("{}/military/group-missions".format(self.url), data=data)
-
-    def _post_main_travel(self, check: str, **kwargs) -> Response:
-        data = dict(_token=self.token, check=check, **kwargs)
-        return self.post("{}/main/travel".format(self.url), data=data)
-
-    def _post_main_vote_article(self, article_id: int) -> Response:
-        data = dict(_token=self.token, articleId=article_id)
-        return self.post("{}/main/vote-article".format(self.url), data=data)
-
-    def _post_main_travel_data(self, **kwargs) -> Response:
-        return self.post("{}/main/travelData".format(self.url), data=dict(_token=self.token, **kwargs))
-
-    def _post_wars_attack_region(self, war_id: int, region_id: int, region_name: str) -> Response:
-        data = {'_token': self.token, 'warId': war_id, 'regionName': region_name, 'regionNameConfirm': region_name}
-        return self.post('{}/wars/attack-region/{}/{}'.format(self.url, war_id, region_id), data=data)
-
-    def _post_main_weekly_challenge_reward(self, reward_id: int) -> Response:
-        data = dict(_token=self.token, rewardId=reward_id)
-        return self.post("{}/main/weekly-challenge-collect-reward".format(self.url), data=data)
-
-    def _post_main_write_article(self, title: str, content: str, location: int, kind: int) -> Response:
-        data = dict(_token=self.token, article_name=title, article_body=content, article_location=location,
-                    article_category=kind)
-        return self.post("{}/main/write-article".format(self.url), data=data)
-
-    # Wall Posts
-    # ## Country
-
-    def _post_main_country_comment_retrieve(self, post_id: int) -> Response:
-        data = {"_token": self.token, "postId": post_id}
-        return self.post("{}/main/country-comment/retrieve/json".format(self.url), data=data)
-
-    def _post_main_country_comment_create(self, post_id: int, comment_message: str) -> Response:
-        data = {"_token": self.token, "postId": post_id, 'comment_message': comment_message}
-        return self.post("{}/main/country-comment/create/json".format(self.url), data=data)
-
-    def _post_main_country_post_create(self, body: str, post_as: int) -> Response:
-        data = {"_token": self.token, "post_message": body, "post_as": post_as}
-        return self.post("{}/main/country-post/create/json".format(self.url), data=data)
-
-    def _post_main_country_post_retrieve(self) -> Response:
-        data = {"_token": self.token, "page": 1, "switchedFrom": False}
-        return self.post("{}/main/country-post/retrieve/json".format(self.url), data=data)
-
-    # ## Military Unit
-
-    def _post_main_military_unit_comment_retrieve(self, post_id: int) -> Response:
-        data = {"_token": self.token, "postId": post_id}
-        return self.post("{}/main/military-unit-comment/retrieve/json".format(self.url), data=data)
-
-    def _post_main_military_unit_comment_create(self, post_id: int, comment_message: str) -> Response:
-        data = {"_token": self.token, "postId": post_id, 'comment_message': comment_message}
-        return self.post("{}/main/military-unit-comment/create/json".format(self.url), data=data)
-
-    def _post_main_military_unit_post_create(self, body: str, post_as: int) -> Response:
-        data = {"_token": self.token, "post_message": body, "post_as": post_as}
-        return self.post("{}/main/military-unit-post/create/json".format(self.url), data=data)
-
-    def _post_main_military_unit_post_retrieve(self) -> Response:
-        data = {"_token": self.token, "page": 1, "switchedFrom": False}
-        return self.post("{}/main/military-unit-post/retrieve/json".format(self.url), data=data)
-
-    # ## Party
-
-    def _post_main_party_comment_retrieve(self, post_id: int) -> Response:
-        data = {"_token": self.token, "postId": post_id}
-        return self.post("{}/main/party-comment/retrieve/json".format(self.url), data=data)
-
-    def _post_main_party_comment_create(self, post_id: int, comment_message: str) -> Response:
-        data = {"_token": self.token, "postId": post_id, 'comment_message': comment_message}
-        return self.post("{}/main/party-comment/create/json".format(self.url), data=data)
-
-    def _post_main_party_post_create(self, body: str) -> Response:
-        data = {"_token": self.token, "post_message": body}
-        return self.post("{}/main/party-post/create/json".format(self.url), data=data)
-
-    def _post_main_party_post_retrieve(self) -> Response:
-        data = {"_token": self.token, "page": 1, "switchedFrom": False}
-        return self.post("{}/main/party-post/retrieve/json".format(self.url), data=data)
-
-    # ## Friend's Wall
-
-    def _post_main_wall_comment_retrieve(self, post_id: int) -> Response:
-        data = {"_token": self.token, "postId": post_id}
-        return self.post("{}/main/wall-comment/retrieve/json".format(self.url), data=data)
-
-    def _post_main_wall_comment_create(self, post_id: int, comment_message: str) -> Response:
-        data = {"_token": self.token, "postId": post_id, 'comment_message': comment_message}
-        return self.post("{}/main/wall-comment/create/json".format(self.url), data=data)
-
-    def _post_main_wall_post_create(self, body: str) -> Response:
-        data = {"_token": self.token, "post_message": body}
-        return self.post("{}/main/wall-post/create/json".format(self.url), data=data)
-
-    def _post_main_wall_post_automatic(self, **kwargs) -> Response:
-        kwargs.update(_token=self.token)
-        return self.post("{}/main/wall-post/create/json".format(self.url), data=kwargs)
-
-    def _post_main_wall_post_retrieve(self) -> Response:
-        data = {"_token": self.token, "page": 1, "switchedFrom": False}
-        return self.post("{}/main/wall-post/retrieve/json".format(self.url), data=data)
-
-    # 12th anniversary endpoints
-    def _get_anniversary_quest_data(self) -> Response:
-        return self.get("{}/main/anniversaryQuestData".format(self.url))
-
-    def _post_map_rewards_unlock(self, node_id: int) -> Response:
-        data = {'nodeId': node_id, '_token': self.token}
-        return self.post("{}/main/map-rewards-unlock".format(self.url), data=data)
-
-    def _post_map_rewards_speedup(self, node_id: int, currency_amount: int) -> Response:
-        data = {'nodeId': node_id, '_token': self.token, "currencyCost": currency_amount}
-        return self.post("{}/main/map-rewards-speedup".format(self.url), data=data)
-
-    def _post_map_rewards_claim(self, node_id: int) -> Response:
-        data = {'nodeId': node_id, '_token': self.token}
-        return self.post("{}/main/map-rewards-claim".format(self.url), data=data)
-
-    def _post_new_war(self, self_country_id: int, attack_country_id: int, debate: str = "") -> Response:
-        data = dict(requirments=1, _token=self.token, debate=debate,
-                    countryNameConfirm=utils.COUNTRY_LINK[attack_country_id])
-        return self.post("{}/{}/new-war".format(self.url, utils.COUNTRY_LINK[self_country_id]), data=data)
-
-    def _post_new_donation(self, country_id: int, amount: int, org_name: str, debate: str = "") -> Response:
-        data = dict(requirments=1, _token=self.token, debate=debate, currency=1, value=amount, commit='Propose',
-                    type_name=org_name)
-        return self.post("{}/{}/new-donation".format(self.url, utils.COUNTRY_LINK[country_id]), data=data)
+        return self.active_until
 
 
 class Reporter:
     __to_update: List[Dict[Any, Any]] = None
-    name: str = ""
-    email: str = ""
-    citizen_id: int = 0
     key: str = ""
     allowed: bool = False
 
     @property
-    def __dict__(self):
-        return dict(name=self.name, email=self.email, citizen_id=self.citizen_id, key=self.key, allowed=self.allowed,
-                    queue=self.__to_update)
+    def name(self) -> str:
+        return self.citizen.name
 
-    def __init__(self):
+    @property
+    def email(self) -> str:
+        return self.citizen.config.email
+
+    @property
+    def citizen_id(self) -> int:
+        return self.citizen.details.citizen_id
+
+    @property
+    def as_dict(self) -> Dict[str, Union[bool, int, str, List[Dict[Any, Any]]]]:
+        return dict(
+            name=self.name,
+            email=self.email,
+            citizen_id=self.citizen_id,
+            key=self.key,
+            allowed=self.allowed,
+            queue=self.__to_update,
+        )
+
+    def __init__(self, citizen):
+        self._citizen = weakref.ref(citizen)
         self._req = Session()
-        self.url = "https://www.16333.com"
-        self._req.headers.update({"user-agent": "Bot reporter v2"})
+        self.url = "https://erep.lv"
+        self._req.headers.update({"user-agent": "eRepublik Script Reporter v3", "erep-version": utils.__version__})
         self.__to_update = []
         self.__registered: bool = False
 
-    def do_init(self, name: str = "", email: str = "", citizen_id: int = 0):
-        self.name: str = name
-        self.email: str = email
-        self.citizen_id: int = citizen_id
+    def do_init(self):
         self.key: str = ""
-        # self.__update_key()
+        self.__update_key()
+        self._req.headers.update({"erep-user-id": str(self.citizen_id), "erep-user-name": self.name})
+        self.register_account()
         self.allowed = True
+
+    @property
+    def citizen(self):
+        return self._citizen()
 
     def __update_key(self):
         self.key = hashlib.md5(bytes(f"{self.name}:{self.email}", encoding="UTF-8")).hexdigest()
-        self.allowed = True
-        self.register_account()
 
     def __bot_update(self, data: dict) -> Response:
         if self.__to_update:
             for unreported_data in self.__to_update:
                 unreported_data.update(player_id=self.citizen_id, key=self.key)
-                self._req.post("{}/bot/update".format(self.url), json=unreported_data)
+                unreported_data = utils.json_loads(utils.json_dumps(unreported_data))
+                r = self._req.post(f"{self.url}/bot/update", json=unreported_data)
+                r.raise_for_status()
             self.__to_update.clear()
-        r = self._req.post("{}/bot/update".format(self.url), json=data)
+        data = utils.json.loads(utils.json_dumps(data))
+        r = self._req.post(f"{self.url}/bot/update", json=data)
+        r.raise_for_status()
         return r
+
+    def _bot_update(self, data: Dict[str, Any]) -> Optional[Response]:
+        if not self.__registered:
+            self.do_init()
+        if self.allowed:
+            try:
+                return self.__bot_update(data)
+            except HTTPError:
+                self.__to_update.append(data)
+        else:
+            self.__to_update.append(data)
 
     def register_account(self):
         if not self.__registered:
-            try:
-                r = self.__bot_update(dict(key=self.key, check=True, player_id=self.citizen_id))
+            r = self.__bot_update(dict(key=self.key, check=True, player_id=self.citizen_id))
+            if r:
                 if not r.json().get("status"):
-                    self._req.post("{}/bot/register".format(self.url), json=dict(name=self.name, email=self.email,
-                                                                                 player_id=self.citizen_id))
-            finally:
+                    self._req.post(
+                        f"{self.url}/bot/register",
+                        json=dict(name=self.name, email=self.email, player_id=self.citizen_id),
+                    )
                 self.__registered = True
+                self.allowed = True
                 self.report_action("STARTED", value=utils.now().strftime("%F %T"))
 
-    def send_state_update(self, xp: int, cc: float, gold: float, inv_total: int, inv: int,
-                          hp_limit: int, hp_interval: int, hp_available: int, food: int, pp: int):
+    def send_state_update(
+        self,
+        xp: int,
+        cc: float,
+        gold: float,
+        inv_total: int,
+        inv: int,
+        hp_limit: int,
+        hp_interval: int,
+        hp_available: int,
+        food: int,
+        pp: int,
+    ):
 
-        data = dict(key=self.key, player_id=self.citizen_id, state=dict(
-            xp=xp, cc=cc, gold=gold, inv_total=inv_total, inv_free=inv_total - inv, inv=inv, food=food,
-            pp=pp, hp_limit=hp_limit, hp_interval=hp_interval, hp_available=hp_available,
-        ))
-
-        if self.allowed:
-            self.__bot_update(data)
+        data = dict(
+            key=self.key,
+            player_id=self.citizen_id,
+            state=dict(
+                xp=xp,
+                cc=cc,
+                gold=gold,
+                inv_total=inv_total,
+                inv_free=inv_total - inv,
+                inv=inv,
+                food=food,
+                pp=pp,
+                hp_limit=hp_limit,
+                hp_interval=hp_interval,
+                hp_available=hp_available,
+            ),
+        )
+        self._bot_update(data)
 
     def report_action(self, action: str, json_val: Dict[Any, Any] = None, value: str = None):
-        if not self.key:
-            if not all([self.email, self.name, self.citizen_id]):
-                pass
-        json_data = {'player_id': self.citizen_id, 'key': self.key, 'log': dict(action=action)}
+        json_data = dict(
+            player_id=getattr(self, "citizen_id", None), log={"action": action}, key=getattr(self, "key", None)
+        )
         if json_val:
-            json_data['log'].update(dict(json=json_val))
+            json_data["log"].update(dict(json=json_val))
         if value:
-            json_data['log'].update(dict(value=value))
-        if self.allowed:
-            self.__bot_update(json_data)
-        else:
-            self.__to_update.append(json_data)
+            json_data["log"].update(dict(value=value))
+        if not any([self.key, self.email, self.name, self.citizen_id]):
+            return
+        self._bot_update(json_data)
 
+    def report_fighting(self, battle: "Battle", invader: bool, division: "BattleDivision", damage: float, hits: int):
+        side = battle.invader if invader else battle.defender
+        self.report_action(
+            "FIGHT",
+            dict(
+                battle_id=battle.id,
+                side=side,
+                dmg=damage,
+                air=battle.has_air,
+                hits=hits,
+                round=battle.zone_id,
+                extra=dict(battle=battle, side=side, division=division),
+            ),
+        )
 
-class MyJSONEncoder(json.JSONEncoder):
-    def default(self, o):
-        from erepublik.citizen import Citizen
-        if isinstance(o, decimal.Decimal):
-            return float("{:.02f}".format(o))
-        elif isinstance(o, datetime.datetime):
-            return dict(__type__='datetime', date=o.strftime("%Y-%m-%d"), time=o.strftime("%H:%M:%S"),
-                        tzinfo=o.tzinfo.zone if o.tzinfo else None)
-        elif isinstance(o, datetime.date):
-            return dict(__type__='date', date=o.strftime("%Y-%m-%d"))
-        elif isinstance(o, datetime.timedelta):
-            return dict(__type__='timedelta', days=o.days, seconds=o.seconds,
-                        microseconds=o.microseconds, total_seconds=o.total_seconds())
-        elif isinstance(o, Response):
-            return dict(headers=o.headers.__dict__, url=o.url, text=o.text)
-        elif hasattr(o, '__dict__'):
-            return o.__dict__
-        elif isinstance(o, (deque, set)):
-            return list(o)
-        elif isinstance(o, Citizen):
-            return o.to_json()
-        return super().default(o)
+    def report_money_donation(self, citizen_id: int, amount: float, is_currency: bool = True):
+        cur = "cc" if is_currency else "gold"
+        self.report_action(
+            "DONATE_MONEY",
+            dict(citizen_id=citizen_id, amount=amount, currency=cur),
+            f"Successfully donated {amount}{cur} to citizen with id {citizen_id}!",
+        )
+
+    def report_item_donation(self, citizen_id: int, amount: float, quality: int, industry: str):
+        self.report_action(
+            "DONATE_ITEMS",
+            dict(citizen_id=citizen_id, amount=amount, quality=quality, industry=industry),
+            f"Successfully donated {amount} x {industry} q{quality} to citizen with id {citizen_id}!",
+        )
+
+    def report_promo(self, kind: str, time_until: datetime.datetime):
+        self._req.post(f"{self.url}/promos/add/", data=dict(kind=kind, time_untill=time_until))
+
+    def fetch_battle_priorities(self, country: constants.Country) -> List["Battle"]:
+        try:
+            battle_response = self._req.get(f"{self.url}/api/v1/battles/{country.id}")
+            return [
+                self.citizen.all_battles[bid]
+                for bid in battle_response.json().get("battle_ids", [])
+                if bid in self.citizen.all_battles
+            ]
+        except:  # noqa
+            return []
+
+    def fetch_tasks(self) -> List[Dict[str, Any]]:
+        try:
+            task_response = self._req.post(
+                f"{self.url}/api/v1/command", data=dict(citizen=self.citizen_id, key=self.key)
+            ).json()
+            if task_response.get("status"):
+                return task_response.get("data")
+            else:
+                return []
+        except:  # noqa
+            return []
 
 
 class BattleSide:
-    id: int
     points: int
-    deployed: List[int] = None
-    allies: List[int] = None
+    deployed: List[constants.Country]
+    allies: List[constants.Country]
+    battle: "Battle"
+    _battle: weakref.ReferenceType
+    country: constants.Country
+    is_defender: bool
 
-    def __init__(self, country_id: int, points: int, allies: List[int], deployed: List[int]):
-        self.id = country_id
+    def __init__(
+        self,
+        battle: "Battle",
+        country: constants.Country,
+        points: int,
+        allies: List[constants.Country],
+        deployed: List[constants.Country],
+        defender: bool,
+    ):
+        self._battle = weakref.ref(battle)
+        self.country = country
         self.points = points
-        self.allies = [int(ally) for ally in allies]
-        self.deployed = [int(ally) for ally in deployed]
+        self.allies = allies
+        self.deployed = deployed
+        self.is_defender = defender
+
+    @property
+    def id(self) -> int:
+        return self.country.id
+
+    def __repr__(self):
+        side_text = "Defender" if self.is_defender else "Invader "
+        return f"<BattleSide: {side_text} {self.country.name}|{self.points:>2d}p>"
+
+    def __str__(self):
+        side_text = "Defender" if self.is_defender else "Invader "
+        return f"{side_text} {self.country.name} - {self.points:>2d} points"
+
+    def __format__(self, format_spec):
+        return self.country.iso
+
+    @property
+    def as_dict(self) -> Dict[str, Union[int, constants.Country, bool, List[constants.Country]]]:
+        return dict(
+            points=self.points,
+            country=self.country,
+            is_defender=self.is_defender,
+            allies=self.allies,
+            deployed=self.deployed,
+        )
+
+    @property
+    def battle(self):
+        return self._battle()
 
 
 class BattleDivision:
+    id: int
     end: datetime.datetime
     epic: bool
     dom_pts: Dict[str, int]
     wall: Dict[str, Union[int, float]]
-    battle_zone_id: int
     def_medal: Dict[str, int]
     inv_medal: Dict[str, int]
+    terrain: int
+    div: int
+    battle: "Battle"
+    _battle: weakref.ReferenceType
+
+    @property
+    def as_dict(self):
+        return dict(
+            id=self.id,
+            division=self.div,
+            terrain=(self.terrain, self.terrain_display),
+            wall=self.wall,
+            epic=self.epic,
+            end=self.div_end,
+        )
+
+    @property
+    def is_air(self):
+        return self.div == 11
 
     @property
     def div_end(self) -> bool:
         return utils.now() >= self.end
 
-    def __init__(self, **kwargs):
+    def __init__(
+        self,
+        battle: "Battle",
+        div_id: int,
+        end: datetime.datetime,
+        epic: bool,
+        div: int,
+        wall_for: int,
+        wall_dom: float,
+        terrain_id: int = 0,
+    ):
         """Battle division helper class
 
-        :param kwargs: must contain keys:
-            div_id: int, end: datetime.datetime, epic: bool, inv_pts: int, def_pts: int,
-            wall_for: int, wall_dom: float, def_medal: Tuple[int, int], inv_medal: Tuple[int, int]
+        :type div_id: int
+        :type end: datetime.datetime
+        :type epic: bool
+        :type div: int
+        :type terrain_id: int
+        :type wall_for: int
+        :type wall_dom: float
         """
-
-        self.battle_zone_id = kwargs.get("div_id", 0)
-        self.end = kwargs.get("end", 0)
-        self.epic = kwargs.get("epic", 0)
-        self.dom_pts = dict({"inv": kwargs.get("inv_pts", 0), "def": kwargs.get("def_pts", 0)})
-        self.wall = dict({"for": kwargs.get("wall_for", 0), "dom": kwargs.get("wall_dom", 0)})
-        self.def_medal = {"id": kwargs.get("def_medal", 0)[0], "dmg": kwargs.get("def_medal", 0)[1]}
-        self.inv_medal = {"id": kwargs.get("inv_medal", 0)[0], "dmg": kwargs.get("inv_medal", 0)[1]}
+        self._battle = weakref.ref(battle)
+        self.id = div_id
+        self.end = end
+        self.epic = epic
+        self.wall = {"for": wall_for, "dom": wall_dom}
+        self.terrain = terrain_id
+        self.div = div
 
     @property
-    def id(self):
-        return self.battle_zone_id
+    def terrain_display(self):
+        return constants.TERRAINS[self.terrain]
+
+    def __str__(self):
+        base_name = f"D{self.div} #{self.id}"
+        if self.terrain:
+            base_name += f" ({self.terrain_display})"
+        if self.div_end:
+            base_name += " Ended"
+        return base_name
+
+    def __repr__(self):
+        return f"<BattleDivision #{self.id} (battle #{self.battle.id})>"
+
+    @property
+    def battle(self):
+        return self._battle()
 
 
 class Battle:
@@ -1149,10 +1077,45 @@ class Battle:
     invader: BattleSide
     defender: BattleSide
     div: Dict[int, BattleDivision]
+    region_id: int
+    region_name: str
 
     @property
-    def is_air(self) -> bool:
+    def as_dict(self):
+        return dict(
+            id=self.id,
+            war_id=self.war_id,
+            divisions=self.div,
+            zone=self.zone_id,
+            rw=self.is_rw,
+            dict_lib=self.is_dict_lib,
+            start=self.start,
+            sides={"inv": self.invader, "def": self.defender},
+            region=[self.region_id, self.region_name],
+            link=self.link,
+        )
+
+    @property
+    def has_air(self) -> bool:
+        for div in self.div.values():
+            if div.div == 11:
+                return True
         return not bool(self.zone_id % 4)
+
+    @property
+    def has_started(self) -> bool:
+        return self.start <= utils.now()
+
+    @property
+    def has_ground(self) -> bool:
+        for div in self.div.values():
+            if div.div != 11:
+                return True
+        return bool(self.zone_id % 4)
+
+    @property
+    def link(self):
+        return f"https://www.erepublik.com/en/military/battlefield/{self.id}"
 
     def __init__(self, battle: Dict[str, Any]):
         """Object representing eRepublik battle.
@@ -1160,61 +1123,70 @@ class Battle:
         :param battle: Dict object for single battle from '/military/campaignsJson/list' response's 'battles' object
         """
 
-        self.id = int(battle.get('id'))
-        self.war_id = int(battle.get('war_id'))
-        self.zone_id = int(battle.get('zone_id'))
-        self.is_rw = bool(battle.get('is_rw'))
-        self.is_as = bool(battle.get('is_as'))
-        self.is_dict_lib = bool(battle.get('is_dict')) or bool(battle.get('is_lib'))
-        self.start = datetime.datetime.fromtimestamp(int(battle.get('start', 0)), tz=utils.erep_tz)
+        self.id = int(battle.get("id"))
+        self.war_id = int(battle.get("war_id"))
+        self.zone_id = int(battle.get("zone_id"))
+        self.is_rw = bool(battle.get("is_rw"))
+        self.is_as = bool(battle.get("is_as"))
+        self.is_dict_lib = bool(battle.get("is_dict")) or bool(battle.get("is_lib"))
+        self.region_id = battle.get("region", {}).get("id")
+        self.region_name = battle.get("region", {}).get("name")
+        self.start = datetime.datetime.fromtimestamp(int(battle.get("start", 0)), tz=constants.erep_tz)
 
         self.invader = BattleSide(
-            battle.get('inv', {}).get('id'), battle.get('inv', {}).get('points'),
-            [row.get('id') for row in battle.get('inv', {}).get('ally_list')],
-            [row.get('id') for row in battle.get('inv', {}).get('ally_list') if row['deployed']]
+            self,
+            constants.COUNTRIES[battle.get("inv", {}).get("id")],
+            battle.get("inv", {}).get("points"),
+            [constants.COUNTRIES[row.get("id")] for row in battle.get("inv", {}).get("ally_list")],
+            [constants.COUNTRIES[row.get("id")] for row in battle.get("inv", {}).get("ally_list") if row["deployed"]],
+            False,
         )
 
         self.defender = BattleSide(
-            battle.get('def', {}).get('id'), battle.get('def', {}).get('points'),
-            [row.get('id') for row in battle.get('def', {}).get('ally_list')],
-            [row.get('id') for row in battle.get('def', {}).get('ally_list') if row['deployed']]
+            self,
+            constants.COUNTRIES[battle.get("def", {}).get("id")],
+            battle.get("def", {}).get("points"),
+            [constants.COUNTRIES[row.get("id")] for row in battle.get("def", {}).get("ally_list")],
+            [constants.COUNTRIES[row.get("id")] for row in battle.get("def", {}).get("ally_list") if row["deployed"]],
+            True,
         )
 
-        self.div = defaultdict(BattleDivision)
-        for div, data in battle.get('div', {}).items():
-            div = int(data.get('div'))
-            if data.get('end'):
-                end = datetime.datetime.fromtimestamp(data.get('end'), tz=utils.erep_tz)
+        self.div = {}
+        for div, data in battle.get("div", {}).items():
+            div = int(div)
+            if data.get("end"):
+                end = datetime.datetime.fromtimestamp(data.get("end"), tz=constants.erep_tz)
             else:
-                end = utils.localize_dt(datetime.datetime.max - datetime.timedelta(days=1))
+                end = constants.max_datetime
 
-            if not data['stats']['def']:
-                def_medal = (0, 0)
-            else:
-                def_medal = (data['stats']['def']['citizenId'], data['stats']['def']['damage'])
-            if not data['stats']['inv']:
-                inv_medal = (0, 0)
-            else:
-                inv_medal = (data['stats']['inv']['citizenId'], data['stats']['inv']['damage'])
-            battle_div = BattleDivision(end=end, epic=data.get('epic_type') in [1, 5], div_id=data.get('id'),
-                                        inv_pts=data.get('dom_pts').get("inv"), def_pts=data.get('dom_pts').get("def"),
-                                        wall_for=data.get('wall').get("for"), wall_dom=data.get('wall').get("dom"),
-                                        def_medal=def_medal, inv_medal=inv_medal)
+            battle_div = BattleDivision(
+                self,
+                div_id=data.get("id"),
+                div=data.get("div"),
+                end=end,
+                epic=data.get("epic_type") in [1, 5],
+                wall_for=data.get("wall").get("for"),
+                wall_dom=data.get("wall").get("dom"),
+                terrain_id=data.get("terrain", 0),
+            )
 
             self.div.update({div: battle_div})
 
-    def __repr__(self):
-        now = utils.now()
+    def __str__(self):
+        time_now = utils.now()
         is_started = self.start < utils.now()
         if is_started:
-            time_part = " {}".format(now - self.start)
+            time_part = f" {time_now - self.start}"
         else:
-            time_part = "-{}".format(self.start - now)
+            time_part = f"-{self.start - time_now}"
 
-        return f"Battle {self.id} | " \
-               f"{utils.ISO_CC[self.invader.id]} : {utils.ISO_CC[self.defender.id]} | " \
-               f"Round {self.zone_id:2} | " \
-               f"Round time {time_part}"
+        return (
+            f"Battle {self.id} for {self.region_name[:16]:16} | "
+            f"{self.invader} : {self.defender} | Round time {time_part} | {'R'+str(self.zone_id):>3}"
+        )
+
+    def __repr__(self):
+        return f"<Battle #{self.id} {self.invader}:{self.defender} R{self.zone_id}>"
 
 
 class EnergyToFight:
@@ -1248,7 +1220,7 @@ class EnergyToFight:
         return self.energy
 
 
-class TelegramBot:
+class TelegramReporter:
     __initialized: bool = False
     __queue: List[str]
     chat_id: int = 0
@@ -1264,23 +1236,33 @@ class TelegramBot:
         self._threads = []
         self.__queue = []
         self.__thread_stopper = threading.Event() if stop_event is None else stop_event
-        self._last_full_energy_report = self._next_time = self._last_time = utils.good_timedelta(utils.now(), datetime.timedelta(hours=1))
+        self._last_full_energy_report = self._last_time = utils.good_timedelta(utils.now(), datetime.timedelta(hours=1))
+        self._next_time = utils.now()
 
     @property
-    def __dict__(self):
-        return {'chat_id': self.chat_id, 'api_url': self.api_url, 'player': self.player_name,
-                'last_time': self._last_time, 'next_time': self._next_time, 'queue': self.__queue,
-                'initialized': self.__initialized, 'has_threads': bool(len(self._threads))}
+    def as_dict(self):
+        return {
+            "chat_id": self.chat_id,
+            "api_url": self.api_url,
+            "player": self.player_name,
+            "last_time": self._last_time,
+            "next_time": self._next_time,
+            "queue": self.__queue,
+            "initialized": self.__initialized,
+            "has_threads": not self._threads,
+        }
 
-    def do_init(self, chat_id: int, token: str, player_name: str = ""):
+    def do_init(self, chat_id: int, token: str = None, player_name: str = None):
+        if token is None:
+            token = "864251270:AAFzZZdjspI-kIgJVk4gF3TViGFoHnf8H4o"
         self.chat_id = chat_id
-        self.api_url = "https://api.telegram.org/bot{}/sendMessage".format(token)
-        self.player_name = player_name
+        self.api_url = f"https://api.telegram.org/bot{token}"
+        self.player_name = player_name or ""
         self.__initialized = True
         self._last_time = utils.good_timedelta(utils.now(), datetime.timedelta(minutes=-5))
         self._last_full_energy_report = utils.good_timedelta(utils.now(), datetime.timedelta(minutes=-30))
         if self.__queue:
-            self.send_message("\n\n––––––––––––––––––––––\n\n".join(self.__queue))
+            self.send_message("Telegram initialized")
 
     def send_message(self, message: str) -> bool:
         self.__queue.append(message)
@@ -1289,30 +1271,14 @@ class TelegramBot:
                 self.__queue.clear()
             return True
         self._threads = [t for t in self._threads if t.is_alive()]
-        self._next_time = utils.good_timedelta(utils.now(), datetime.timedelta(minutes=1))
+        self._next_time = utils.good_timedelta(utils.now(), datetime.timedelta(seconds=20))
         if not self._threads:
-            name = "telegram_{}send".format(f"{self.player_name}_" if self.player_name else "")
+            name = f"telegram_{f'{self.player_name}_' if self.player_name else ''}send"
             send_thread = threading.Thread(target=self.__send_messages, name=name)
             send_thread.start()
             self._threads.append(send_thread)
 
         return True
-
-    def report_free_bhs(self, battles: List[Tuple[int, int, int, int, datetime.timedelta]]):
-        battle_links = []
-        for battle_id, side_id, against_id, damage, time_left in battles:
-            total_seconds = int(time_left.total_seconds())
-            time_start = ""
-            hours, remainder = divmod(total_seconds, 3600)
-            if hours:
-                time_start = f"{hours}h "
-            minutes, seconds = divmod(remainder, 60)
-            time_start += f"{minutes:02}m {seconds:02}s"
-            damage = "{:,}".format(damage).replace(',', ' ')
-            battle_links.append(f"*{damage}*dmg bh for [{utils.COUNTRIES[side_id]} vs {utils.COUNTRIES[against_id]}]"
-                                f"(https://www.erepublik.com/en/military/battlefield/{battle_id}) "
-                                f"_time since start {time_start}_")
-        self.send_message("Free BHs:\n" + "\n".join(battle_links))
 
     def report_full_energy(self, available: int, limit: int, interval: int):
         if (utils.now() - self._last_full_energy_report).total_seconds() >= 30 * 60:
@@ -1320,8 +1286,29 @@ class TelegramBot:
             message = f"Full energy ({available}hp/{limit}hp +{interval}hp/6min)"
             self.send_message(message)
 
-    def report_medal(self, msg):
-        self.send_message(f"New award: *{msg}*")
+    def report_medal(self, msg, multiple: bool = True):
+        new_line = "\n" if multiple else ""
+        self.send_message(f"New award: {new_line}*{msg}*")
+
+    def report_fight(self, battle: "Battle", invader: bool, division: "BattleDivision", damage: float, hits: int):
+        side_txt = (battle.invader if invader else battle.defender).country.iso
+        self.send_message(
+            f"*Fight report*:\n{int(damage):,d} dmg ({hits} hits) in"
+            f" [battle {battle.id} for {battle.region_name[:16]}]({battle.link}) in d{division.div} on "
+            f"{side_txt} side"
+        )
+
+    def report_item_donation(self, citizen_id: int, amount: float, product: str):
+        self.send_message(
+            f"*Donation*: {amount} x {product} to citizen "
+            f"[{citizen_id}](https://www.erepublik.com/en/citizen/profile/{citizen_id})"
+        )
+
+    def report_money_donation(self, citizen_id: int, amount: float, is_currency: bool = True):
+        self.send_message(
+            f"*Donation*: {amount}{'cc' if is_currency else 'gold'} to citizen "
+            f"[{citizen_id}](https://www.erepublik.com/en/citizen/profile/{citizen_id})"
+        )
 
     def __send_messages(self):
         while self._next_time > utils.now():
@@ -1329,12 +1316,63 @@ class TelegramBot:
                 break
             self.__thread_stopper.wait(utils.get_sleep_seconds(self._next_time))
 
-        message = "\n\n––––––––––––––––––––––\n\n".join(self.__queue)
+        message = "\n\n".join(self.__queue)
         if self.player_name:
-            message = f"Player *{self.player_name}*\n" + message
-        response = post(self.api_url, json=dict(chat_id=self.chat_id, text=message, parse_mode="Markdown"))
+            message = f"Player *{self.player_name}*\n\n" + message
+        response = post(
+            f"{self.api_url}/sendMessage", json=dict(chat_id=self.chat_id, text=message, parse_mode="Markdown")
+        )
         self._last_time = utils.now()
-        if response.json().get('ok'):
-            self.__queue = []
+        if response.json().get("ok"):
+            self.__queue.clear()
             return True
         return False
+
+    def send_photos(self, photos: List[Tuple[str, BytesIO]]):
+        for photo_title, photo in photos:
+            photo.seek(0)
+            post(
+                f"https://{self.api_url}/sendPhoto",
+                data=dict(chat_id=self.chat_id, caption=photo_title),
+                files=[("photo", ("f{utils.slugify(photo_title)}.png", photo))],
+            )
+        return
+
+
+class OfferItem(NamedTuple):
+    price: float = 999_999_999.0
+    country: constants.Country = constants.Country(0, "", "", "")
+    amount: int = 0
+    offer_id: int = 0
+    citizen_id: int = 0
+
+
+class Inventory:
+    final: types.InvFinal
+    active: types.InvFinal
+    boosters: types.InvBooster
+    raw: types.InvRaw
+    market: types.InvRaw
+    used: int
+    total: int
+
+    def __init__(self):
+        self.active = {}
+        self.final = {}
+        self.boosters = {}
+        self.raw = {}
+        self.offers = {}
+        self.used = 0
+        self.total = 0
+
+    @property
+    def as_dict(self) -> Dict[str, Union[types.InvFinal, types.InvRaw, int]]:
+        return dict(
+            active=self.active,
+            final=self.final,
+            boosters=self.boosters,
+            raw=self.raw,
+            offers=self.offers,
+            total=self.total,
+            used=self.used,
+        )

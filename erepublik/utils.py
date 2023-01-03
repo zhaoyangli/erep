@@ -1,134 +1,75 @@
 import datetime
-import inspect
 import os
 import re
 import sys
 import time
-import traceback
 import unicodedata
+import warnings
+from base64 import b64encode
 from decimal import Decimal
+from logging import Logger
 from pathlib import Path
-from typing import Any, List, Mapping, NoReturn, Optional, Union
+from typing import Any, Dict, List, Union
 
 import pytz
 import requests
+from requests import Response
+
+from erepublik import __version__, constants
 
 try:
     import simplejson as json
 except ImportError:
     import json
 
+__all__ = [
+    "ErepublikJSONEncoder",
+    "VERSION",
+    "b64json",
+    "calculate_hit",
+    "date_from_eday",
+    "deprecation",
+    "eday_from_date",
+    "get_air_hit_dmg_value",
+    "get_file",
+    "get_final_hit_dmg",
+    "get_ground_hit_dmg_value",
+    "get_sleep_seconds",
+    "good_timedelta",
+    "interactive_sleep",
+    "json",
+    "json_decode_object_hook",
+    "json_dump",
+    "json_dumps",
+    "json_load",
+    "json_loads",
+    "localize_dt",
+    "localize_timestamp",
+    "normalize_html_json",
+    "now",
+    "silent_sleep",
+    "slugify",
+    "write_file",
+]
 
-__all__ = ["FOOD_ENERGY", "COMMIT_ID", "COUNTRIES", "erep_tz", 'COUNTRY_LINK',
-           "now", "localize_dt", "localize_timestamp", "good_timedelta", "eday_from_date", "date_from_eday",
-           "get_sleep_seconds", "interactive_sleep", "silent_sleep",
-           "write_silent_log", "write_interactive_log", "get_file", "write_file",
-           "send_email", "normalize_html_json", "process_error", "process_warning", 'report_promo', 'calculate_hit']
-
-if not sys.version_info >= (3, 7):
-    raise AssertionError('This script requires Python version 3.7 and higher\n'
-                         'But Your version is v{}.{}.{}'.format(*sys.version_info))
-
-FOOD_ENERGY = dict(q1=2, q2=4, q3=6, q4=8, q5=10, q6=12, q7=20)
-COMMIT_ID = "7b92e19"
-
-erep_tz = pytz.timezone('US/Pacific')
-AIR_RANKS = {1: "Airman", 2: "Airman 1st Class", 3: "Airman 1st Class*", 4: "Airman 1st Class**",
-             5: "Airman 1st Class***", 6: "Airman 1st Class****", 7: "Airman 1st Class*****",
-             8: "Senior Airman", 9: "Senior Airman*", 10: "Senior Airman**", 11: "Senior Airman***",
-             12: "Senior Airman****", 13: "Senior Airman*****",
-             14: "Staff Sergeant", 15: "Staff Sergeant*", 16: "Staff Sergeant**", 17: "Staff Sergeant***",
-             18: "Staff Sergeant****", 19: "Staff Sergeant*****",
-             20: "Aviator", 21: "Aviator*", 22: "Aviator**", 23: "Aviator***", 24: "Aviator****", 25: "Aviator*****",
-             26: "Flight Lieutenant", 27: "Flight Lieutenant*", 28: "Flight Lieutenant**", 29: "Flight Lieutenant***",
-             30: "Flight Lieutenant****", 31: "Flight Lieutenant*****",
-             32: "Squadron Leader", 33: "Squadron Leader*", 34: "Squadron Leader**", 35: "Squadron Leader***",
-             36: "Squadron Leader****", 37: "Squadron Leader*****",
-             38: "Chief Master Sergeant", 39: "Chief Master Sergeant*", 40: "Chief Master Sergeant**",
-             41: "Chief Master Sergeant***", 42: "Chief Master Sergeant****", 43: "Chief Master Sergeant*****",
-             44: "Wing Commander", 45: "Wing Commander*", 46: "Wing Commander**", 47: "Wing Commander***",
-             48: "Wing Commander****", 49: "Wing Commander*****",
-             50: "Group Captain", 51: "Group Captain*", 52: "Group Captain**", 53: "Group Captain***",
-             54: "Group Captain****", 55: "Group Captain*****",
-             56: "Air Commodore", 57: "Air Commodore*", 58: "Air Commodore**", 59: "Air Commodore***",
-             60: "Air Commodore****", 61: "Air Commodore*****", }
-
-GROUND_RANKS = {1: "Recruit", 2: "Private", 3: "Private*", 4: "Private**", 5: "Private***", 6: "Corporal",
-                7: "Corporal*", 8: "Corporal**", 9: "Corporal***",
-                10: "Sergeant", 11: "Sergeant*", 12: "Sergeant**", 13: "Sergeant***", 14: "Lieutenant",
-                15: "Lieutenant*", 16: "Lieutenant**", 17: "Lieutenant***",
-                18: "Captain", 19: "Captain*", 20: "Captain**", 21: "Captain***", 22: "Major", 23: "Major*",
-                24: "Major**", 25: "Major***",
-                26: "Commander", 27: "Commander*", 28: "Commander**", 29: "Commander***", 30: "Lt Colonel",
-                31: "Lt Colonel*", 32: "Lt Colonel**", 33: "Lt Colonel***",
-                34: "Colonel", 35: "Colonel*", 36: "Colonel**", 37: "Colonel***", 38: "General", 39: "General*",
-                40: "General**", 41: "General***",
-                42: "Field Marshal", 43: "Field Marshal*", 44: "Field Marshal**", 45: "Field Marshal***",
-                46: "Supreme Marshal", 47: "Supreme Marshal*", 48: "Supreme Marshal**", 49: "Supreme Marshal***",
-                50: "National Force", 51: "National Force*", 52: "National Force**", 53: "National Force***",
-                54: "World Class Force", 55: "World Class Force*", 56: "World Class Force**",
-                57: "World Class Force***", 58: "Legendary Force", 59: "Legendary Force*", 60: "Legendary Force**",
-                61: "Legendary Force***",
-                62: "God of War", 63: "God of War*", 64: "God of War**", 65: "God of War***", 66: "Titan", 67: "Titan*",
-                68: "Titan**", 69: "Titan***",
-                70: "Legends I", 71: "Legends II", 72: "Legends III", 73: "Legends IV", 74: "Legends V",
-                75: "Legends VI", 76: "Legends VII", 77: "Legends VIII", 78: "Legends IX", 79: "Legends X",
-                80: "Legends XI", 81: "Legends XII", 82: "Legends XIII", 83: "Legends XIV", 84: "Legends XV",
-                85: "Legends XVI", 86: "Legends XVII", 87: "Legends XVIII", 88: "Legends XIX", 89: "Legends XX", }
-
-COUNTRIES = {1: 'Romania', 9: 'Brazil', 10: 'Italy', 11: 'France', 12: 'Germany', 13: 'Hungary', 14: 'China',
-             15: 'Spain', 23: 'Canada', 24: 'USA', 26: 'Mexico', 27: 'Argentina', 28: 'Venezuela', 29: 'United Kingdom',
-             30: 'Switzerland', 31: 'Netherlands', 32: 'Belgium', 33: 'Austria', 34: 'Czech Republic', 35: 'Poland',
-             36: 'Slovakia', 37: 'Norway', 38: 'Sweden', 39: 'Finland', 40: 'Ukraine', 41: 'Russia', 42: 'Bulgaria',
-             43: 'Turkey', 44: 'Greece', 45: 'Japan', 47: 'South Korea', 48: 'India', 49: 'Indonesia', 50: 'Australia',
-             51: 'South Africa', 52: 'Republic of Moldova', 53: 'Portugal', 54: 'Ireland', 55: 'Denmark', 56: 'Iran',
-             57: 'Pakistan', 58: 'Israel', 59: 'Thailand', 61: 'Slovenia', 63: 'Croatia', 64: 'Chile', 65: 'Serbia',
-             66: 'Malaysia', 67: 'Philippines', 68: 'Singapore', 69: 'Bosnia and Herzegovina', 70: 'Estonia',
-             71: 'Latvia', 72: 'Lithuania', 73: 'North Korea', 74: 'Uruguay', 75: 'Paraguay', 76: 'Bolivia', 77: 'Peru',
-             78: 'Colombia', 79: 'Republic of Macedonia (FYROM)', 80: 'Montenegro', 81: 'Republic of China (Taiwan)',
-             82: 'Cyprus', 83: 'Belarus', 84: 'New Zealand', 164: 'Saudi Arabia', 165: 'Egypt',
-             166: 'United Arab Emirates', 167: 'Albania', 168: 'Georgia', 169: 'Armenia', 170: 'Nigeria', 171: 'Cuba'}
-
-COUNTRY_LINK = {1: 'Romania', 9: 'Brazil', 11: 'France', 12: 'Germany', 13: 'Hungary', 82: 'Cyprus', 168: 'Georgia',
-                15: 'Spain', 23: 'Canada', 26: 'Mexico', 27: 'Argentina', 28: 'Venezuela', 80: 'Montenegro', 24: 'USA',
-                29: 'United-Kingdom', 50: 'Australia', 47: 'South-Korea', 171: 'Cuba',
-                79: 'Republic-of-Macedonia-FYROM',
-                30: 'Switzerland', 31: 'Netherlands', 32: 'Belgium', 33: 'Austria', 34: 'Czech-Republic', 35: 'Poland',
-                36: 'Slovakia', 37: 'Norway', 38: 'Sweden', 39: 'Finland', 40: 'Ukraine', 41: 'Russia', 42: 'Bulgaria',
-                43: 'Turkey', 44: 'Greece', 45: 'Japan', 48: 'India', 49: 'Indonesia', 78: 'Colombia', 68: 'Singapore',
-                51: 'South Africa', 52: 'Republic-of-Moldova', 53: 'Portugal', 54: 'Ireland', 55: 'Denmark', 56: 'Iran',
-                57: 'Pakistan', 58: 'Israel', 59: 'Thailand', 61: 'Slovenia', 63: 'Croatia', 64: 'Chile', 65: 'Serbia',
-                66: 'Malaysia', 67: 'Philippines', 70: 'Estonia', 165: 'Egypt', 14: 'China', 77: 'Peru', 10: 'Italy',
-                71: 'Latvia', 72: 'Lithuania', 73: 'North-Korea', 74: 'Uruguay', 75: 'Paraguay', 76: 'Bolivia',
-                81: 'Republic-of-China-Taiwan', 166: 'United-Arab-Emirates', 167: 'Albania', 69: 'Bosnia-Herzegovina',
-                169: 'Armenia', 83: 'Belarus', 84: 'New-Zealand', 164: 'Saudi-Arabia', 170: 'Nigeria', }
-
-ISO_CC = {1: 'ROU', 9: 'BRA', 10: 'ITA', 11: 'FRA', 12: 'DEU', 13: 'HUN', 14: 'CHN', 15: 'ESP', 23: 'CAN', 24: 'USA',
-          26: 'MEX', 27: 'ARG', 28: 'VEN', 29: 'GBR', 30: 'CHE', 31: 'NLD', 32: 'BEL', 33: 'AUT', 34: 'CZE', 35: 'POL',
-          36: 'SVK', 37: 'NOR', 38: 'SWE', 39: 'FIN', 40: 'UKR', 41: 'RUS', 42: 'BGR', 43: 'TUR', 44: 'GRC', 45: 'JPN',
-          47: 'KOR', 48: 'IND', 49: 'IDN', 50: 'AUS', 51: 'ZAF', 52: 'MDA', 53: 'PRT', 54: 'IRL', 55: 'DNK', 56: 'IRN',
-          57: 'PAK', 58: 'ISR', 59: 'THA', 61: 'SVN', 63: 'HRV', 64: 'CHL', 65: 'SRB', 66: 'MYS', 67: 'PHL', 68: 'SGP',
-          69: 'BiH', 70: 'EST', 71: 'LVA', 72: 'LTU', 73: 'PRK', 74: 'URY', 75: 'PRY', 76: 'BOL', 77: 'PER', 78: 'COL',
-          79: 'MKD', 80: 'MNE', 81: 'TWN', 82: 'CYP', 83: 'BLR', 84: 'NZL', 164: 'SAU', 165: 'EGY', 166: 'UAE',
-          167: 'ALB', 168: 'GEO', 169: 'ARM', 170: 'NGA', 171: 'CUB'}
+VERSION: str = __version__
 
 
 def now() -> datetime.datetime:
-    return datetime.datetime.now(erep_tz).replace(microsecond=0)
+    return datetime.datetime.now(constants.erep_tz).replace(microsecond=0)
 
 
 def localize_timestamp(timestamp: int) -> datetime.datetime:
-    return datetime.datetime.fromtimestamp(timestamp, erep_tz)
+    return datetime.datetime.fromtimestamp(timestamp, constants.erep_tz)
 
 
 def localize_dt(dt: Union[datetime.date, datetime.datetime]) -> datetime.datetime:
-    try:
-        try:
-            return erep_tz.localize(dt)
-        except AttributeError:
-            return erep_tz.localize(datetime.datetime.combine(dt, datetime.time(0, 0, 0)))
-    except ValueError:
-        return dt.astimezone(erep_tz)
+    if isinstance(dt, datetime.datetime):
+        return constants.erep_tz.localize(dt)
+    elif isinstance(dt, datetime.date):
+        return constants.erep_tz.localize(datetime.datetime.combine(dt, datetime.time(0, 0, 0)))
+    else:
+        raise TypeError(f"Argument dt must be and instance of datetime.datetime or datetime.date not {type(dt)}")
 
 
 def good_timedelta(dt: datetime.datetime, td: datetime.timedelta) -> datetime.datetime:
@@ -141,22 +82,24 @@ def good_timedelta(dt: datetime.datetime, td: datetime.timedelta) -> datetime.da
     :return: datetime object with correct timezone when jumped over DST
     :rtype: datetime.datetime
     """
-    return erep_tz.normalize(dt + td)
+    return constants.erep_tz.normalize(dt + td)
 
 
-def eday_from_date(date: Union[datetime.date, datetime.datetime] = now()) -> int:
+def eday_from_date(date: Union[datetime.date, datetime.datetime] = None) -> int:
+    if date is None:
+        date = now()
     if isinstance(date, datetime.date):
         date = datetime.datetime.combine(date, datetime.time(0, 0, 0))
     return (date - datetime.datetime(2007, 11, 20, 0, 0, 0)).days
 
 
-def date_from_eday(eday: int) -> datetime.date:
+def date_from_eday(eday: int) -> datetime.datetime:
     return localize_dt(datetime.date(2007, 11, 20)) + datetime.timedelta(days=eday)
 
 
-def get_sleep_seconds(time_untill: datetime.datetime) -> int:
-    """ time_until aware datetime object Wrapper for sleeping until """
-    sleep_seconds = int((time_untill - now()).total_seconds())
+def get_sleep_seconds(time_until: datetime.datetime) -> int:
+    """time_until aware datetime object Wrapper for sleeping until"""
+    sleep_seconds = int((time_until - now()).total_seconds())
     return sleep_seconds if sleep_seconds > 0 else 0
 
 
@@ -173,7 +116,7 @@ def interactive_sleep(sleep_seconds: int):
         #     seconds = seconds % 30 if seconds % 30 else 30
         else:
             seconds = 1
-        sys.stdout.write("\rSleeping for {:4} more seconds".format(sleep_seconds))
+        sys.stdout.write(f"\rSleeping for {sleep_seconds:4} more seconds")
         sys.stdout.flush()
         time.sleep(seconds)
         sleep_seconds -= seconds
@@ -181,25 +124,6 @@ def interactive_sleep(sleep_seconds: int):
 
 
 silent_sleep = time.sleep
-
-
-def _write_log(msg, timestamp: bool = True, should_print: bool = False):
-    erep_time_now = now()
-    txt = "[{}] {}".format(erep_time_now.strftime('%F %T'), msg) if timestamp else msg
-    if not os.path.isdir('log'):
-        os.mkdir('log')
-    with open("log/%s.log" % erep_time_now.strftime('%F'), 'a', encoding="utf-8") as f:
-        f.write("%s\n" % txt)
-    if should_print:
-        print(txt)
-
-
-def write_interactive_log(*args, **kwargs):
-    _write_log(should_print=True, *args, **kwargs)
-
-
-def write_silent_log(*args, **kwargs):
-    _write_log(should_print=False, *args, **kwargs)
 
 
 def get_file(filepath: str) -> str:
@@ -228,161 +152,18 @@ def get_file(filepath: str) -> str:
 
 def write_file(filename: str, content: str) -> int:
     filename = get_file(filename)
-    with open(filename, 'ab') as f:
-        return f.write(content.encode("utf-8"))
+    with open(filename, "ab") as f:
+        ret = f.write(content.encode("utf-8"))
+    return ret
 
-
-def write_request(response: requests.Response, is_error: bool = False):
-    from erepublik import Citizen
-    # Remove GET args from url name
-    url = response.url
-    last_index = url.index("?") if "?" in url else len(response.url)
-
-    name = slugify(response.url[len(Citizen.url):last_index])
-    html = response.text
-
-    try:
-        json.loads(html)
-        ext = "json"
-    except json.decoder.JSONDecodeError:
-        ext = "html"
-
-    if not is_error:
-        filename = "debug/requests/{}_{}.{}".format(now().strftime('%F_%H-%M-%S'), name, ext)
-        write_file(filename, html)
-    else:
-        return {"name": "{}_{}.{}".format(now().strftime('%F_%H-%M-%S'), name, ext),
-                "content": html.encode('utf-8'),
-                "mimetype": "application/json" if ext == "json" else "text/html"}
-
-
-def send_email(name: str, content: List[Any], player=None, local_vars: Mapping[Any, Any] = None,
-               promo: bool = False, captcha: bool = False):
-    if local_vars is None:
-        local_vars = {}
-    from erepublik import Citizen
-
-    file_content_template = "<html><head><title>{title}</title></head><body>{body}</body></html>"
-    if isinstance(player, Citizen):
-        resp = write_request(player.r, is_error=True)
-    else:
-        resp = {"name": "None.html", "mimetype": "text/html",
-                "content": file_content_template.format(body="<br/>".join(content), title="Error"), }
-
-    if promo:
-        resp = {"name": "%s.html" % name, "mimetype": "text/html",
-                "content": file_content_template.format(title="Promo", body="<br/>".join(content))}
-        subject = "[eBot][{}] Promos: {}".format(now().strftime('%F %T'), name)
-
-    elif captcha:
-        resp = {"name": "%s.html" % name, "mimetype": "text/html",
-                "content": file_content_template.format(title="ReCaptcha", body="<br/>".join(content))}
-        subject = "[eBot][{}] RECAPTCHA: {}".format(now().strftime('%F %T'), name)
-    else:
-        subject = "[eBot][%s] Bug trace: %s" % (now().strftime('%F %T'), name)
-
-    body = "".join(traceback.format_stack()) + \
-           "\n\n" + \
-           "\n".join(content)
-    data = dict(send_mail=True, subject=subject, bugtrace=body)
-    if promo:
-        data.update({'promo': True})
-    elif captcha:
-        data.update({'captcha': True})
-    else:
-        data.update({"bug": True})
-
-    files = [('file', (resp.get("name"), resp.get("content"), resp.get("mimetype"))), ]
-    filename = "log/%s.log" % now().strftime('%F')
-    if os.path.isfile(filename):
-        files.append(('file', (filename[4:], open(filename, 'rb'), "text/plain")))
-    if local_vars:
-        if "state_thread" in local_vars:
-            local_vars.pop('state_thread', None)
-        from erepublik.classes import MyJSONEncoder
-        files.append(('file', ("local_vars.json", json.dumps(local_vars, indent=2,
-                                                             cls=MyJSONEncoder, sort_keys=True), "application/json")))
-    if isinstance(player, Citizen):
-        files.append(('file', ("instance.json", player.to_json(indent=True), "application/json")))
-    print(data)
-    print(files)
-    # requests.post('https://pasts.72.lv', data=data, files=files)
-    print("send_email")
 
 def normalize_html_json(js: str) -> str:
-    js = re.sub(r' \'(.*?)\'', lambda a: '"%s"' % a.group(1), js)
-    js = re.sub(r'(\d\d):(\d\d):(\d\d)', r'\1\2\3', js)
+    js = re.sub(r" \'(.*?)\'", lambda a: f'"{a.group(1)}"', js)
+    js = re.sub(r"(\d\d):(\d\d):(\d\d)", r"\1\2\3", js)
     js = re.sub(r'([{\s,])(\w+)(:)(?!"})', r'\1"\2"\3', js)
-    js = re.sub(r',\s*}', '}', js)
+    js = re.sub(r",\s*}", "}", js)
     return js
 
-
-def process_error(log_info: str, name: str, exc_info: tuple, citizen=None, commit_id: str = None,
-                  interactive: Optional[bool] = None):
-    """
-    Process error logging and email sending to developer
-    :param interactive: Should print interactively
-    :type interactive: bool
-    :param log_info: String to be written in output
-    :type log_info: str
-    :param name: String Instance name
-    :type name: str
-    :param exc_info: tuple output from sys.exc_info()
-    :type exc_info: tuple
-    :param citizen: Citizen instance
-    :type citizen: Citizen
-    :param commit_id: Code's version by commit id
-    :type commit_id: str
-    """
-    type_, value_, traceback_ = exc_info
-    content = [log_info]
-    if commit_id:
-        content += ["Commit id: %s" % commit_id]
-    content += [str(value_), str(type_), ''.join(traceback.format_tb(traceback_))]
-
-    if interactive:
-        write_interactive_log(log_info)
-    elif interactive is not None:
-        write_silent_log(log_info)
-    trace = inspect.trace()
-    if trace:
-        trace = trace[-1][0].f_locals
-        if trace.get('__name__') == '__main__':
-            trace = {'commit_id': trace.get('COMMIT_ID'),
-                     'interactive': trace.get('INTERACTIVE'),
-                     'version': trace.get('__version__'),
-                     'config': trace.get('CONFIG')}
-    else:
-        trace = dict()
-    send_email(name, content, citizen, local_vars=trace)
-
-
-def process_warning(log_info: str, name: str, exc_info: tuple, citizen=None, commit_id: str = None):
-    """
-    Process error logging and email sending to developer
-    :param log_info: String to be written in output
-    :param name: String Instance name
-    :param exc_info: tuple output from sys.exc_info()
-    :param citizen: Citizen instance
-    :param commit_id: Code's version by commit id
-    """
-    type_, value_, traceback_ = exc_info
-    content = [log_info]
-    if commit_id:
-        content += ["Commit id: %s" % commit_id]
-    content += [str(value_), str(type_), ''.join(traceback.format_tb(traceback_))]
-
-    trace = inspect.trace()
-    if trace:
-        trace = trace[-1][0].f_locals
-    else:
-        trace = dict()
-    send_email(name, content, citizen, local_vars=trace)
-
-
-def report_promo(kind: str, time_untill: datetime.datetime) -> NoReturn:
-    # requests.post('https://api.erep.lv/promos/add/', data=dict(kind=kind, time_untill=time_untill))
-    print("report_promo")
 
 def slugify(value, allow_unicode=False) -> str:
     """
@@ -393,49 +174,176 @@ def slugify(value, allow_unicode=False) -> str:
     """
     value = str(value)
     if allow_unicode:
-        value = unicodedata.normalize('NFKC', value)
+        value = unicodedata.normalize("NFKC", value)
     else:
-        value = unicodedata.normalize('NFKD', value).encode('ascii', 'ignore').decode('ascii')
-    value = re.sub(r'[^\w\s-]', '_', value).strip().lower()
-    return re.sub(r'[-\s]+', '-', value)
+        value = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii")
+    value = re.sub(r"[^\w\s-]", "_", value).strip().lower()
+    return re.sub(r"[-\s]+", "-", value)
 
 
-def calculate_hit(strength: float, rang: int, tp: bool, elite: bool, ne: bool, booster: int = 0,
-                  weapon: int = 200, is_deploy: bool = False) -> float:
+def calculate_hit(
+    strength: float,
+    rang: int,
+    tp: bool,
+    elite: bool,
+    ne: bool,
+    booster: int = 0,
+    weapon: int = 200,
+    is_deploy: bool = False,
+) -> Decimal:
     dec = 3 if is_deploy else 0
-    base_str = (1 + Decimal(str(round(strength, 3))) / 400)
-    base_rnk = (1 + Decimal(str(rang / 5)))
-    base_wpn = (1 + Decimal(str(weapon / 100)))
+    base_str = 1 + Decimal(str(round(strength, 3))) / 400
+    base_rnk = 1 + Decimal(str(rang / 5))
+    base_wpn = 1 + Decimal(str(weapon / 100))
     dmg = 10 * base_str * base_rnk * base_wpn
 
-    if elite:
-        dmg = dmg * 11 / 10
-
-    if tp and rang >= 70:
-        dmg = dmg * (1 + Decimal((rang - 69) / 10))
-
-    dmg = dmg * (100 + booster) / 100
-
-    if ne:
-        dmg = dmg * 11 / 10
-    return round(dmg, dec)
+    dmg = get_final_hit_dmg(dmg, rang, tp=tp, elite=elite, ne=ne, booster=booster)
+    return Decimal(round(dmg, dec))
 
 
-def get_ground_hit_dmg_value(citizen_id: int, natural_enemy: bool = False, true_patriot: bool = False,
-                             booster: int = 0, weapon_power: int = 200) -> float:
+def get_ground_hit_dmg_value(
+    citizen_id: int, natural_enemy: bool = False, true_patriot: bool = False, booster: int = 0, weapon_power: int = 200
+) -> Decimal:
     r = requests.get(f"https://www.erepublik.com/en/main/citizen-profile-json/{citizen_id}").json()
-    rang = r['military']['militaryData']['ground']['rankNumber']
-    strength = r['military']['militaryData']['ground']['strength']
-    elite = r['citizenAttributes']['level'] > 100
+    rang = r["military"]["militaryData"]["ground"]["rankNumber"]
+    strength = r["military"]["militaryData"]["ground"]["strength"]
+    elite = r["citizenAttributes"]["level"] > 100
     if natural_enemy:
         true_patriot = True
 
     return calculate_hit(strength, rang, true_patriot, elite, natural_enemy, booster, weapon_power)
 
 
-def get_air_hit_dmg_value(citizen_id: int, natural_enemy: bool = False, true_patriot: bool = False, booster: int = 0,
-                          weapon_power: int = 0) -> float:
+def get_air_hit_dmg_value(
+    citizen_id: int, natural_enemy: bool = False, true_patriot: bool = False, booster: int = 0, weapon_power: int = 0
+) -> Decimal:
     r = requests.get(f"https://www.erepublik.com/en/main/citizen-profile-json/{citizen_id}").json()
-    rang = r['military']['militaryData']['aircraft']['rankNumber']
-    elite = r['citizenAttributes']['level'] > 100
+    rang = r["military"]["militaryData"]["aircraft"]["rankNumber"]
+    elite = r["citizenAttributes"]["level"] > 100
     return calculate_hit(0, rang, true_patriot, elite, natural_enemy, booster, weapon_power)
+
+
+def get_final_hit_dmg(
+    base_dmg: Union[Decimal, float, str],
+    rang: int,
+    tp: bool = False,
+    elite: bool = False,
+    ne: bool = False,
+    booster: int = 0,
+) -> Decimal:
+    dmg = Decimal(str(base_dmg))
+
+    if elite:
+        dmg = dmg * 11 / 10
+    if tp and rang >= 70:
+        dmg = dmg * (1 + Decimal((rang - 69) / 10))
+    dmg = dmg * (100 + booster) / 100
+    if ne:
+        dmg = dmg * 11 / 10
+    return Decimal(dmg)
+
+
+def deprecation(message):
+    warnings.warn(message, DeprecationWarning, stacklevel=2)
+
+
+def json_decode_object_hook(
+    o: Union[Dict[str, Any], List[Any], int, float, str]
+) -> Union[Dict[str, Any], List[Any], int, float, str, datetime.date, datetime.datetime, datetime.timedelta]:
+    """Convert classes.ErepublikJSONEncoder datetime, date and timedelta to their python objects
+
+    :param o:
+    :return: Union[Dict[str, Any], List[Any], int, float, str, datetime.date, datetime.datetime, datetime.timedelta]
+    """
+    if o.get("__type__"):
+        _type = o.get("__type__")
+        if _type == "datetime":
+            dt = datetime.datetime.strptime(f"{o['date']} {o['time']}", "%Y-%m-%d %H:%M:%S")
+            if o.get("tzinfo"):
+                dt = pytz.timezone(o["tzinfo"]).localize(dt)
+            return dt
+        elif _type == "date":
+            dt = datetime.datetime.strptime(f"{o['date']}", "%Y-%m-%d")
+            return dt.date()
+        elif _type == "timedelta":
+            return datetime.timedelta(seconds=o["total_seconds"])
+    return o
+
+
+def json_load(f, **kwargs):
+    # kwargs.update(object_hook=json_decode_object_hook)
+    return json.load(f, **kwargs)
+
+
+def json_loads(s: str, **kwargs):
+    # kwargs.update(object_hook=json_decode_object_hook)
+    return json.loads(s, **kwargs)
+
+
+def json_dump(obj, fp, *args, **kwargs):
+    if not kwargs.get("cls"):
+        kwargs.update(cls=ErepublikJSONEncoder)
+    return json.dump(obj, fp, *args, **kwargs)
+
+
+def json_dumps(obj, *args, **kwargs):
+    if not kwargs.get("cls"):
+        kwargs.update(cls=ErepublikJSONEncoder)
+    return json.dumps(obj, *args, **kwargs)
+
+
+def b64json(obj: Union[Dict[str, Union[int, List[str]]], List[str]]):
+    if isinstance(obj, list):
+        return b64encode(json.dumps(obj, separators=(",", ":")).encode("utf-8")).decode("utf-8")
+    elif isinstance(obj, (int, str)):
+        return obj
+    elif isinstance(obj, dict):
+        for k, v in obj.items():
+            obj[k] = b64json(v)
+    else:
+        from .classes import ErepublikException
+
+        raise ErepublikException(f"Unhandled object type! obj is {type(obj)}")
+    return b64encode(json.dumps(obj, separators=(",", ":")).encode("utf-8")).decode("utf-8")
+
+
+class ErepublikJSONEncoder(json.JSONEncoder):
+    def default(self, o):
+        try:
+            from erepublik.citizen import Citizen
+
+            if isinstance(o, Decimal):
+                return float(f"{o:.02f}")
+            elif isinstance(o, datetime.datetime):
+                return dict(
+                    __type__="datetime",
+                    date=o.strftime("%Y-%m-%d"),
+                    time=o.strftime("%H:%M:%S"),
+                    tzinfo=str(o.tzinfo) if o.tzinfo else None,
+                )
+            elif isinstance(o, datetime.date):
+                return dict(__type__="date", date=o.strftime("%Y-%m-%d"))
+            elif isinstance(o, datetime.timedelta):
+                return dict(
+                    __type__="timedelta",
+                    days=o.days,
+                    seconds=o.seconds,
+                    microseconds=o.microseconds,
+                    total_seconds=o.total_seconds(),
+                )
+            elif isinstance(o, Response):
+                return dict(headers=dict(o.__dict__["headers"]), url=o.url, text=o.text, status_code=o.status_code)
+            elif hasattr(o, "as_dict"):
+                return o.as_dict
+            elif isinstance(o, set):
+                return list(o)
+            elif isinstance(o, Citizen):
+                return o.to_json()
+            elif isinstance(o, Logger):
+                return str(o)
+            elif hasattr(o, "__dict__"):
+                return o.__dict__
+            else:
+                return super().default(o)
+        except Exception as e:  # noqa
+            return str(e)
